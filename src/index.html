@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ORIPA DECK</title>
+  <style>
+    :root { color-scheme: dark; --bg:#090b0f; --panel:#12161d; --line:#2b313b; --text:#f4f6f8; --muted:#9ca6b5; --red:#ff4f64; --cyan:#53d7de; --gold:#f4ca64; }
+    * { box-sizing:border-box; letter-spacing:0; }
+    body { margin:0; min-width:320px; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+    button,input,select { font:inherit; color:inherit; }
+    button { cursor:pointer; }
+    .shell { width:min(1180px,100%); margin:auto; padding:0 18px 48px; }
+    header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:18px; min-height:64px; border-bottom:1px solid var(--line); background:rgba(9,11,15,.96); }
+    .brand { margin-right:auto; font-size:20px; font-weight:900; color:var(--red); }
+    .balance { font-variant-numeric:tabular-nums; color:var(--gold); font-weight:800; }
+    .tabs { display:flex; gap:4px; overflow:auto; border-bottom:1px solid var(--line); padding:12px 0 0; }
+    .tab { min-width:max-content; border:0; border-bottom:2px solid transparent; background:transparent; padding:10px 14px; color:var(--muted); }
+    .tab.active { color:var(--text); border-color:var(--red); }
+    .view { display:none; padding-top:22px; }
+    .view.active { display:block; }
+    h1 { margin:0 0 6px; font-size:clamp(24px,5vw,40px); }
+    h2 { margin:0 0 14px; font-size:20px; }
+    h3 { margin:0; font-size:16px; }
+    p { margin:6px 0; }
+    .muted { color:var(--muted); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:12px; }
+    .pack,.card { border:1px solid var(--line); border-radius:8px; background:var(--panel); overflow:hidden; }
+    .pack-banner { height:128px; padding:18px; display:flex; flex-direction:column; justify-content:flex-end; background:linear-gradient(125deg,#21131a,#17232c 55%,#162324); border-bottom:1px solid var(--line); }
+    .pack-body,.card-body { padding:14px; }
+    .pack-meta,.actions,.toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .pack-meta { justify-content:space-between; margin:10px 0; }
+    .btn { min-height:38px; padding:8px 13px; border:1px solid var(--line); border-radius:6px; background:#1a2029; }
+    .btn:hover { border-color:#596474; }
+    .btn.primary { background:var(--red); border-color:var(--red); color:#fff; font-weight:800; }
+    .btn.accent { background:var(--cyan); border-color:var(--cyan); color:#081012; font-weight:800; }
+    .btn:disabled { opacity:.4; cursor:not-allowed; }
+    .rarity { display:inline-block; min-width:40px; text-align:center; padding:2px 7px; border-radius:4px; background:#252c36; font-weight:900; }
+    .rarity.SSR { background:var(--red); }.rarity.SR { background:var(--gold); color:#191300; }.rarity.R { background:var(--cyan); color:#071416; }
+    .card { position:relative; }
+    .card img { display:block; width:100%; aspect-ratio:3/4; object-fit:cover; background:#191e25; }
+    .card input[type=checkbox] { position:absolute; top:10px; left:10px; width:22px; height:22px; accent-color:var(--red); }
+    .form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; max-width:720px; }
+    label { display:grid; gap:5px; color:var(--muted); }
+    label.wide,.form .wide { grid-column:1/-1; }
+    input,select { width:100%; min-height:42px; border:1px solid var(--line); border-radius:6px; background:#0d1117; padding:9px 10px; }
+    .check { display:flex; align-items:center; gap:8px; }.check input { width:18px; min-height:18px; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:10px; border-bottom:1px solid var(--line); text-align:left; }
+    .table-wrap { overflow:auto; }
+    .toast { position:fixed; right:18px; bottom:18px; z-index:20; max-width:min(420px,calc(100% - 36px)); padding:12px 16px; border:1px solid var(--line); border-radius:6px; background:#202630; box-shadow:0 12px 40px #000a; transform:translateY(120px); transition:.2s; }
+    .toast.show { transform:none; }.toast.error { border-color:var(--red); }
+    dialog { width:min(720px,calc(100% - 24px)); border:1px solid var(--line); border-radius:8px; background:#10151c; color:var(--text); padding:0; }
+    dialog::backdrop { background:#000c; }
+    .dialog-head,.dialog-body { padding:16px; }.dialog-head { display:flex; border-bottom:1px solid var(--line); }.dialog-head h2 { margin:0 auto 0 0; }
+    .effect { min-height:300px; display:grid; place-items:center; text-align:center; overflow:hidden; background:radial-gradient(circle,#3b2730,#10151c 60%); }
+    .effect video { width:100%; max-height:60vh; }.effect-card { animation:reveal .7s ease both; }
+    @keyframes reveal { from { opacity:0; transform:scale(.7) rotate(-5deg); } to { opacity:1; transform:none; } }
+    .auth { min-height:100vh; display:grid; place-items:center; padding:24px; }
+    .auth-box { width:min(520px,100%); border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:24px; }
+    .hidden { display:none !important; }
+    @media (max-width:640px) { .shell{padding-inline:12px}.form{grid-template-columns:1fr}.form label{grid-column:1}.desktop-label{display:none}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card-body{padding:10px}.pack{grid-column:span 2}th,td{padding:8px} }
+  </style>
+</head>
+<body>
+  <main id="auth" class="auth">
+    <section class="auth-box">
+      <div class="brand">ORIPA DECK</div>
+      <h1>カードを引く。</h1>
+      <div class="tabs"><button class="tab active" data-auth="login">ログイン</button><button class="tab" data-auth="register">新規登録</button></div>
+      <form id="login-form" class="form" style="margin-top:18px">
+        <label class="wide">メールアドレス<input id="login-email" type="email" required autocomplete="email"></label>
+        <label class="wide">パスワード<input id="login-password" type="password" required autocomplete="current-password"></label>
+        <button class="btn primary wide" type="submit">ログイン</button>
+      </form>
+      <form id="register-form" class="form hidden" style="margin-top:18px">
+        <label class="wide">メールアドレス<input id="register-email" type="email" required autocomplete="email"></label>
+        <label>パスワード<input id="register-password" type="password" minlength="8" required autocomplete="new-password"></label>
+        <label>生年月日<input id="birth-date" type="date" required></label>
+        <label class="check wide"><input id="age-confirmed" type="checkbox" required>18歳以上であることを確認しました</label>
+        <button class="btn primary wide" type="submit">アカウント作成</button>
+      </form>
+    </section>
+  </main>
+
+  <div id="app" class="shell hidden">
+    <header><div class="brand">ORIPA DECK</div><span id="balance" class="balance">0 pt</span><button id="logout" class="btn" title="ログアウト">退出</button></header>
+    <nav class="tabs" id="nav">
+      <button class="tab active" data-view="packs-view">パック</button>
+      <button class="tab" data-view="cards-view">獲得カード</button>
+      <button class="tab" data-view="shipping-view">発送</button>
+      <button class="tab" data-view="history-view">履歴</button>
+      <button id="admin-tab" class="tab hidden" data-view="admin-view">管理</button>
+    </nav>
+    <section id="packs-view" class="view active"><h2>販売中のパック</h2><div id="packs" class="grid"></div></section>
+    <section id="cards-view" class="view"><div class="toolbar"><h2 style="margin-right:auto">獲得カード</h2><button id="redeem-selected" class="btn accent">選択を還元</button><button id="ship-selected" class="btn">選択を発送</button></div><div id="cards" class="grid"></div></section>
+    <section id="shipping-view" class="view">
+      <h2>配送先</h2><form id="address-form" class="form">
+        <label>宛名<input name="name" required></label><label>郵便番号<input name="postalCode" required></label>
+        <label>都道府県<input name="prefecture" required></label><label>市区町村<input name="city" required></label>
+        <label class="wide">住所<input name="line1" required></label><label class="wide">建物名・部屋番号<input name="line2"></label>
+        <label>電話番号<input name="phone"></label><label class="check"><input name="isDefault" type="checkbox">既定の配送先</label>
+        <button class="btn primary wide" type="submit">配送先を登録</button>
+      </form>
+      <h2 style="margin-top:28px">発送申請</h2><div id="shipments" class="table-wrap"></div>
+    </section>
+    <section id="history-view" class="view"><h2>ポイント履歴</h2><div id="transactions" class="table-wrap"></div></section>
+    <section id="admin-view" class="view">
+      <h2>管理</h2>
+      <form id="points-form" class="form"><label>ユーザー<select id="point-user"></select></label><label>付与・減算ポイント<input id="point-amount" type="number" required></label><button class="btn primary wide">ポイントを反映</button></form>
+      <h2 style="margin-top:28px">演出設定</h2>
+      <form id="effect-form" class="form"><label>ランク<select id="effect-rarity"><option>N</option><option>R</option><option>SR</option><option>SSR</option></select></label><label>表示名<input id="effect-label"></label><label class="wide">動画URL<input id="effect-url" type="url" placeholder="https://..."></label><button class="btn wide">演出を保存</button></form>
+      <p id="audit-status" class="muted"></p>
+    </section>
+  </div>
+
+  <dialog id="detail-dialog"><div class="dialog-head"><h2 id="detail-title"></h2><button class="btn" data-close="detail-dialog">閉じる</button></div><div id="detail-body" class="dialog-body"></div></dialog>
+  <dialog id="result-dialog"><div class="dialog-head"><h2>抽選結果</h2><button id="skip-effect" class="btn">スキップ</button></div><div id="result-body" class="effect"></div></dialog>
+  <dialog id="shipping-dialog"><div class="dialog-head"><h2>発送申請</h2><button class="btn" data-close="shipping-dialog">閉じる</button></div><form id="shipping-form" class="dialog-body form"><label class="wide">配送先<select id="shipping-address"></select></label><button class="btn primary wide">申請する</button></form></dialog>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script>
+    let token = sessionStorage.getItem('gacha-token') || '';
+    let currentUser = null;
+    let selectedCards = [];
+    const byId = id => document.getElementById(id);
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const formatDate = value => new Intl.DateTimeFormat('ja-JP',{dateStyle:'short',timeStyle:'short'}).format(new Date(value));
+    function toast(message, error=false) { const el=byId('toast'); el.textContent=message; el.className=`toast show${error?' error':''}`; clearTimeout(toast.timer); toast.timer=setTimeout(()=>el.className='toast',3200); }
+    async function api(url, options={}) { const response=await fetch(url,{...options,headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})}}); const text=await response.text(); const data=text?JSON.parse(text):{}; if(!response.ok) throw new Error(data.error||'request failed'); return data; }
+    async function refreshMe() { const {user}=await api('/api/me'); currentUser=user; byId('balance').textContent=`${user.points.toLocaleString()} pt`; byId('admin-tab').classList.toggle('hidden',user.role!=='admin'); }
+    async function enterApp() { byId('auth').classList.add('hidden'); byId('app').classList.remove('hidden'); await Promise.all([refreshMe(),loadPacks(),loadCards(),loadShipping(),loadTransactions()]); if(currentUser.role==='admin') await loadAdmin(); }
+    document.querySelectorAll('[data-auth]').forEach(button=>button.addEventListener('click',()=>{ document.querySelectorAll('[data-auth]').forEach(x=>x.classList.toggle('active',x===button)); byId('login-form').classList.toggle('hidden',button.dataset.auth!=='login'); byId('register-form').classList.toggle('hidden',button.dataset.auth!=='register'); }));
+    byId('login-form').addEventListener('submit',async event=>{ event.preventDefault(); try { const data=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:byId('login-email').value,password:byId('login-password').value})}); token=data.token; sessionStorage.setItem('gacha-token',token); await enterApp(); } catch(error){toast(error.message,true);} });
+    byId('register-form').addEventListener('submit',async event=>{ event.preventDefault(); try { await api('/api/auth/register',{method:'POST',body:JSON.stringify({email:byId('register-email').value,password:byId('register-password').value,birthDate:byId('birth-date').value,ageConfirmed:byId('age-confirmed').checked})}); toast('登録しました。ログインしてください'); document.querySelector('[data-auth=login]').click(); } catch(error){toast(error.message,true);} });
+    byId('logout').addEventListener('click',async()=>{ try{await api('/api/auth/logout',{method:'POST'});}finally{token='';sessionStorage.removeItem('gacha-token');location.reload();} });
+    byId('nav').addEventListener('click',event=>{ const button=event.target.closest('[data-view]'); if(!button)return; document.querySelectorAll('#nav .tab').forEach(x=>x.classList.toggle('active',x===button)); document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id===button.dataset.view)); });
+    async function loadPacks(){ const {packs}=await api('/api/packs'); byId('packs').innerHTML=packs.map(pack=>`<article class="pack"><div class="pack-banner"><span class="rarity">${esc(pack.status)}</span><h3>${esc(pack.name)}</h3></div><div class="pack-body"><div class="pack-meta"><strong>${pack.pricePoints.toLocaleString()} pt</strong><span>${pack.remaining} / ${pack.totalSlots}</span></div><div class="actions"><button class="btn" data-detail="${esc(pack.id)}">詳細</button><button class="btn primary" data-draw="${esc(pack.id)}" data-quantity="1" ${pack.remaining<1?'disabled':''}>1口</button><button class="btn" data-draw="${esc(pack.id)}" data-quantity="10" ${pack.remaining<10?'disabled':''}>10口</button><button class="btn" data-draw="${esc(pack.id)}" data-quantity="all" ${pack.remaining<1?'disabled':''}>全口</button></div></div></article>`).join(''); }
+    byId('packs').addEventListener('click',event=>{ const draw=event.target.closest('[data-draw]'); const detail=event.target.closest('[data-detail]'); if(draw)runDraw(draw.dataset.draw,draw.dataset.quantity); if(detail)showDetail(detail.dataset.detail); });
+    async function showDetail(packId){ try { const data=await api(`/api/packs/${packId}`); byId('detail-title').textContent=data.pack.name; byId('detail-body').innerHTML=`<h3>排出確率</h3><div class="table-wrap"><table><tbody>${Object.entries(data.odds).sort((a,b)=>['SSR','SR','R','N'].indexOf(a[0])-['SSR','SR','R','N'].indexOf(b[0])).map(([rarity,value])=>`<tr><td><span class="rarity ${rarity}">${rarity}</span></td><td>${value.count} / ${value.total}</td></tr>`).join('')}</tbody></table></div><h3 style="margin-top:18px">カードラインナップ</h3><div class="grid">${data.lineup.map(item=>`<div class="card"><img src="${esc(item.card.imageUrl)}" alt=""><div class="card-body"><span class="rarity ${item.card.rarity}">${item.card.rarity}</span> ${esc(item.card.name)} <span class="muted">x${item.count}</span></div></div>`).join('')}</div>`; byId('detail-dialog').showModal(); } catch(error){toast(error.message,true);} }
+    async function runDraw(packId,quantity){ try { const data=await api('/api/draw',{method:'POST',body:JSON.stringify({packId,quantity})}); showResults(data.results); await Promise.all([refreshMe(),loadPacks(),loadCards(),loadTransactions()]); } catch(error){toast(error.message,true);} }
+    function showResults(results){ const first=results[0]; const body=byId('result-body'); const cards=results.map(result=>`<div class="effect-card"><span class="rarity ${result.card.rarity}">${result.card.rarity}</span><h3>${esc(result.card.name)}</h3></div>`).join(''); body.innerHTML=first.effect?.url?`<video id="effect-video" autoplay playsinline src="${esc(first.effect.url)}"></video><div id="effect-results" class="hidden">${cards}</div>`:cards; const video=byId('effect-video'); if(video)video.addEventListener('ended',skipEffect); byId('result-dialog').showModal(); }
+    function skipEffect(){ const video=byId('effect-video'); if(video)video.remove(); byId('effect-results')?.classList.remove('hidden'); byId('skip-effect').textContent='閉じる'; }
+    byId('skip-effect').addEventListener('click',()=>{ if(byId('effect-video'))skipEffect(); else {byId('result-dialog').close();byId('skip-effect').textContent='スキップ';} });
+    async function loadCards(){ const {cards}=await api('/api/cards'); selectedCards=cards.filter(card=>card.status==='unprocessed'&&selectedCards.includes(card.id)).map(card=>card.id); byId('cards').innerHTML=cards.length?cards.map(item=>`<article class="card"><input type="checkbox" data-card-id="${esc(item.id)}" ${item.status!=='unprocessed'?'disabled':''} ${selectedCards.includes(item.id)?'checked':''}><img src="${esc(item.card.imageUrl)}" alt=""><div class="card-body"><span class="rarity ${item.card.rarity}">${item.card.rarity}</span><h3>${esc(item.card.name)}</h3><p class="muted">${esc(item.status)} · 還元 ${item.card.redeemPoints} pt</p></div></article>`).join(''):'<p class="muted">獲得カードはありません。</p>'; }
+    byId('cards').addEventListener('change',event=>{ const input=event.target.closest('[data-card-id]'); if(!input)return; selectedCards=[...document.querySelectorAll('[data-card-id]:checked')].map(x=>x.dataset.cardId); });
+    byId('redeem-selected').addEventListener('click',async()=>{ if(!selectedCards.length)return toast('カードを選択してください',true); try{const data=await api('/api/cards/redeem',{method:'POST',body:JSON.stringify({userCardIds:selectedCards})});selectedCards=[];toast(`${data.userCards.length}枚を還元しました`);await Promise.all([refreshMe(),loadCards(),loadTransactions()]);}catch(error){toast(error.message,true);} });
+    byId('ship-selected').addEventListener('click',async()=>{ if(!selectedCards.length)return toast('カードを選択してください',true); const {addresses}=await api('/api/addresses'); if(!addresses.length){toast('先に配送先を登録してください',true);document.querySelector('[data-view=shipping-view]').click();return;} byId('shipping-address').innerHTML=addresses.map(address=>`<option value="${esc(address.id)}">${esc(address.name)} · ${esc(address.prefecture)}${esc(address.city)}${esc(address.line1)}</option>`).join('');byId('shipping-dialog').showModal(); });
+    byId('shipping-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/api/shipments',{method:'POST',body:JSON.stringify({userCardIds:selectedCards,addressId:byId('shipping-address').value})});selectedCards=[];byId('shipping-dialog').close();toast('発送を申請しました');await Promise.all([loadCards(),loadShipping()]);}catch(error){toast(error.message,true);}});
+    byId('address-form').addEventListener('submit',async event=>{event.preventDefault();const form=new FormData(event.target);const data=Object.fromEntries(form);data.isDefault=form.has('isDefault');try{await api('/api/addresses',{method:'POST',body:JSON.stringify(data)});event.target.reset();toast('配送先を登録しました');await loadShipping();}catch(error){toast(error.message,true);}});
+    async function loadShipping(){ const {shipments}=await api('/api/shipments'); byId('shipments').innerHTML=shipments.length?`<table><thead><tr><th>申請日</th><th>状態</th><th>ID</th></tr></thead><tbody>${shipments.map(x=>`<tr><td>${formatDate(x.createdAt)}</td><td>${esc(x.status)}</td><td>${esc(x.id)}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">発送申請はありません。</p>'; }
+    async function loadTransactions(){ const {transactions}=await api('/api/transactions'); byId('transactions').innerHTML=transactions.length?`<table><thead><tr><th>日時</th><th>種別</th><th>増減</th><th>残高</th></tr></thead><tbody>${transactions.slice().reverse().map(x=>`<tr><td>${formatDate(x.createdAt)}</td><td>${esc(x.type)}</td><td>${x.amount>0?'+':''}${x.amount}</td><td>${x.balanceAfter}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">履歴はありません。</p>'; }
+    async function loadAdmin(){ const [{users},audit]=await Promise.all([api('/api/admin/users'),api('/api/admin/draws/verify')]);byId('point-user').innerHTML=users.map(user=>`<option value="${esc(user.id)}">${esc(user.email)} (${user.points} pt)</option>`).join('');byId('audit-status').textContent=`抽選ログ: ${audit.count}件 · ハッシュチェーン ${audit.valid?'正常':'不整合'}`; }
+    byId('points-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/api/admin/points',{method:'POST',body:JSON.stringify({userId:byId('point-user').value,amount:Number(byId('point-amount').value)})});toast('ポイントを反映しました');await Promise.all([refreshMe(),loadAdmin(),loadTransactions()]);}catch(error){toast(error.message,true);}});
+    byId('effect-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/api/admin/effects',{method:'POST',body:JSON.stringify({rarity:byId('effect-rarity').value,label:byId('effect-label').value,url:byId('effect-url').value})});toast('演出を保存しました');}catch(error){toast(error.message,true);}});
+    document.querySelectorAll('[data-close]').forEach(button=>button.addEventListener('click',()=>byId(button.dataset.close).close()));
+    if(token)enterApp().catch(()=>{token='';sessionStorage.removeItem('gacha-token');location.reload();});
+  </script>
+</body>
+</html>
