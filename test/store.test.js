@@ -61,7 +61,7 @@ test('admin authentication requires encrypted TOTP and uses an isolated 8h sessi
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gacha-admin-')); const oldSecret=process.env.ADMIN_2FA_SECRET; process.env.ADMIN_2FA_SECRET='JBSWY3DPEHPK3PXP';
   try {
     const s=new Store(path.join(dir,'store.json')); const admin=s.state.adminUsers[0]; const raw=fs.readFileSync(path.join(dir,'store.json'),'utf8'); assert.ok(admin.twoFactorSecretEnc); assert.doesNotMatch(raw,/JBSWY3DPEHPK3PXP/);
-    assert.throws(()=>s.login('admin@example.com','admin-dev-password'),/requires 2FA/);
+    assert.throws(()=>s.login('admin@example.com','admin-dev-password'),/must use \/admin/);
     const login=s.adminLogin('admin@example.com','admin-dev-password',generateTotp('JBSWY3DPEHPK3PXP'),{ip:'127.0.0.1',environment:'development'}); assert.equal(login.user.role,'owner'); assert.ok(Date.parse(login.expiresAt)-Date.now() <= 8*60*60*1000);
     assert.ok(s.adminForToken(login.token,{ip:'127.0.0.1',environment:'development'})); assert.equal(s.adminForToken(login.token,{ip:'10.0.0.1',environment:'development'}),null); assert.equal(s.userForToken(login.token),null);
   } finally { if(oldSecret===undefined) delete process.env.ADMIN_2FA_SECRET; else process.env.ADMIN_2FA_SECRET=oldSecret; }

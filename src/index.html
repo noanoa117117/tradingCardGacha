@@ -59,6 +59,7 @@
     .auth { min-height:100vh; display:grid; place-items:center; padding:24px; }
     .auth-box { width:min(520px,100%); border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:24px; }
     .hidden { display:none !important; }
+    html[data-surface="user"] .admin-only,html[data-surface="admin"] .user-only { display:none !important; }
     @media (max-width:640px) { .shell{padding-inline:12px}.form{grid-template-columns:1fr}.form label{grid-column:1}.desktop-label{display:none}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card-body{padding:10px}.pack{grid-column:span 2}th,td{padding:8px} }
   </style>
 </head>
@@ -66,15 +67,15 @@
   <main id="auth" class="auth">
     <section class="auth-box">
       <div class="brand">ORIPA DECK</div>
-      <h1>カードを引く。</h1>
-      <div class="tabs"><button class="tab active" data-auth="login">ログイン</button><button class="tab" data-auth="register">新規登録</button></div>
+      <h1 id="auth-title">カードを引く。</h1>
+      <div class="tabs"><button class="tab active" data-auth="login">ログイン</button><button class="tab user-only" data-auth="register">新規登録</button></div>
       <form id="login-form" class="form" style="margin-top:18px">
         <label class="wide">メールアドレス<input id="login-email" type="email" required autocomplete="email"></label>
         <label class="wide">パスワード<input id="login-password" type="password" required autocomplete="current-password"></label>
-        <label class="wide">管理者2FAコード（管理者のみ・6桁）<input id="login-otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code"></label>
+        <label class="wide admin-only">管理者2FAコード（6桁）<input id="login-otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code"></label>
         <button class="btn primary wide" type="submit">ログイン</button>
       </form>
-      <form id="register-form" class="form hidden" style="margin-top:18px">
+      <form id="register-form" class="form hidden user-only" style="margin-top:18px">
         <label class="wide">メールアドレス<input id="register-email" type="email" required autocomplete="email"></label>
         <label>パスワード<input id="register-password" type="password" minlength="8" required autocomplete="new-password"></label>
         <label>生年月日<input id="birth-date" type="date" required></label>
@@ -87,15 +88,15 @@
   <div id="app" class="shell hidden">
     <header><div class="brand">ORIPA DECK</div><span id="environment-badge" class="muted"></span><span id="balance" class="balance">0 pt</span><button id="logout" class="btn" title="ログアウト">退出</button></header>
     <nav class="tabs" id="nav">
-      <button class="tab active" data-view="packs-view">パック</button>
-      <button class="tab" data-view="cards-view">獲得カード</button>
-      <button class="tab" data-view="shipping-view">発送</button>
-      <button class="tab" data-view="history-view">履歴</button>
-      <button id="admin-tab" class="tab hidden" data-view="admin-view">管理</button>
+      <button class="tab active user-only" data-view="packs-view">パック</button>
+      <button class="tab user-only" data-view="cards-view">獲得カード</button>
+      <button class="tab user-only" data-view="shipping-view">発送</button>
+      <button class="tab user-only" data-view="history-view">履歴</button>
+      <button id="admin-tab" class="tab admin-only" data-view="admin-view">管理</button>
     </nav>
-    <section id="packs-view" class="view active"><h2>販売中のパック</h2><div id="packs" class="grid"></div></section>
-    <section id="cards-view" class="view"><div class="toolbar"><h2 style="margin-right:auto">獲得カード</h2><button id="redeem-selected" class="btn accent">選択を還元</button><button id="ship-selected" class="btn">選択を発送</button></div><div id="cards" class="grid"></div></section>
-    <section id="shipping-view" class="view">
+    <section id="packs-view" class="view active user-only"><h2>販売中のパック</h2><div id="packs" class="grid"></div></section>
+    <section id="cards-view" class="view user-only"><div class="toolbar"><h2 style="margin-right:auto">獲得カード</h2><button id="redeem-selected" class="btn accent">選択を還元</button><button id="ship-selected" class="btn">選択を発送</button></div><div id="cards" class="grid"></div></section>
+    <section id="shipping-view" class="view user-only">
       <h2>配送先</h2><form id="address-form" class="form">
         <label>宛名<input name="name" required></label><label>郵便番号<input name="postalCode" required></label>
         <label>都道府県<input name="prefecture" required></label><label>市区町村<input name="city" required></label>
@@ -105,8 +106,8 @@
       </form>
       <h2 style="margin-top:28px">発送申請</h2><div id="shipments" class="table-wrap"></div>
     </section>
-    <section id="history-view" class="view"><h2>ポイント履歴</h2><div id="transactions" class="table-wrap"></div></section>
-    <section id="admin-view" class="view">
+    <section id="history-view" class="view user-only"><h2>ポイント履歴</h2><div id="transactions" class="table-wrap"></div></section>
+    <section id="admin-view" class="view admin-only">
       <h2>管理</h2>
       <h2>ユーザー管理</h2>
       <form id="admin-user-search" class="form"><label>メール<input id="admin-search-email" type="email"></label><label>ユーザーID<input id="admin-search-id"></label><label>電話番号<input id="admin-search-phone"></label><button class="btn wide">検索</button></form><div id="admin-users" class="table-wrap" style="margin-top:10px"></div>
@@ -130,7 +131,9 @@
   <div id="toast" class="toast" role="status"></div>
 
   <script>
-    let token = sessionStorage.getItem('gacha-token') || '';
+    const surface = document.documentElement.dataset.surface || 'user';
+    const tokenKey = surface === 'admin' ? 'gacha-admin-token' : 'gacha-user-token';
+    let token = sessionStorage.getItem(tokenKey) || '';
     let currentUser = null;
     let adminEnvironment = null;
     let selectedCards = [];
@@ -139,12 +142,12 @@
     const formatDate = value => new Intl.DateTimeFormat('ja-JP',{dateStyle:'short',timeStyle:'short'}).format(new Date(value));
     function toast(message, error=false) { const el=byId('toast'); el.textContent=message; el.className=`toast show${error?' error':''}`; clearTimeout(toast.timer); toast.timer=setTimeout(()=>el.className='toast',3200); }
     async function api(url, options={}) { const response=await fetch(url,{...options,headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})}}); const text=await response.text(); const data=text?JSON.parse(text):{}; if(!response.ok) throw new Error(data.error||'request failed'); return data; }
-    async function refreshMe() { const {user}=await api('/api/me'); currentUser=user; byId('balance').textContent=`${user.points.toLocaleString()} pt`; byId('admin-tab').classList.toggle('hidden',!['owner','operator','viewer'].includes(user.role)); }
-    async function enterApp() { byId('auth').classList.add('hidden'); byId('app').classList.remove('hidden'); await refreshMe(); if(['owner','operator','viewer'].includes(currentUser.role)){ const env=await api('/api/admin/environment'); adminEnvironment=env; byId('environment-badge').textContent=`${env.environment.toUpperCase()} 管理画面`; byId('environment-badge').style.color=env.production?'var(--red)':'#79d18a'; await loadAdmin(); return; } await Promise.all([loadPacks(),loadCards(),loadShipping(),loadTransactions()]); }
+    async function refreshMe() { const {user}=await api('/api/me'); const isAdmin=['owner','operator','viewer'].includes(user.role); if((surface==='admin')!==isAdmin)throw new Error('wrong application surface'); currentUser=user; byId('balance').textContent=`${user.points.toLocaleString()} pt`; }
+    async function enterApp() { byId('auth').classList.add('hidden'); byId('app').classList.remove('hidden'); await refreshMe(); if(surface==='admin'){ document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id==='admin-view')); byId('admin-tab').classList.add('active'); const env=await api('/api/admin/environment'); adminEnvironment=env; byId('environment-badge').textContent=`${env.environment.toUpperCase()} 管理画面`; byId('environment-badge').style.color=env.production?'var(--red)':'#79d18a'; await loadAdmin(); return; } await Promise.all([loadPacks(),loadCards(),loadShipping(),loadTransactions()]); }
     document.querySelectorAll('[data-auth]').forEach(button=>button.addEventListener('click',()=>{ document.querySelectorAll('[data-auth]').forEach(x=>x.classList.toggle('active',x===button)); byId('login-form').classList.toggle('hidden',button.dataset.auth!=='login'); byId('register-form').classList.toggle('hidden',button.dataset.auth!=='register'); }));
-    byId('login-form').addEventListener('submit',async event=>{ event.preventDefault(); try { const credentials={email:byId('login-email').value,password:byId('login-password').value}; const otp=byId('login-otp').value.trim(); const data=await api(otp?'/api/admin/auth/login':'/api/auth/login',{method:'POST',body:JSON.stringify(otp?{...credentials,otp}:credentials)}); token=data.token; sessionStorage.setItem('gacha-token',token); await enterApp(); } catch(error){toast(error.message,true);} });
+    byId('login-form').addEventListener('submit',async event=>{ event.preventDefault(); try { const credentials={email:byId('login-email').value,password:byId('login-password').value}; const otp=byId('login-otp').value.trim(); const data=await api(surface==='admin'?'/api/admin/auth/login':'/api/auth/login',{method:'POST',body:JSON.stringify(surface==='admin'?{...credentials,otp}:credentials)}); token=data.token; sessionStorage.setItem(tokenKey,token); await enterApp(); } catch(error){toast(error.message,true);} });
     byId('register-form').addEventListener('submit',async event=>{ event.preventDefault(); try { await api('/api/auth/register',{method:'POST',body:JSON.stringify({email:byId('register-email').value,password:byId('register-password').value,birthDate:byId('birth-date').value,ageConfirmed:byId('age-confirmed').checked})}); toast('登録しました。ログインしてください'); document.querySelector('[data-auth=login]').click(); } catch(error){toast(error.message,true);} });
-    byId('logout').addEventListener('click',async()=>{ try{await api('/api/auth/logout',{method:'POST'});}finally{token='';sessionStorage.removeItem('gacha-token');location.reload();} });
+    byId('logout').addEventListener('click',async()=>{ try{await api(surface==='admin'?'/api/admin/auth/logout':'/api/auth/logout',{method:'POST'});}finally{token='';sessionStorage.removeItem(tokenKey);location.reload();} });
     byId('nav').addEventListener('click',event=>{ const button=event.target.closest('[data-view]'); if(!button)return; document.querySelectorAll('#nav .tab').forEach(x=>x.classList.toggle('active',x===button)); document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id===button.dataset.view)); });
     async function loadPacks(){ const {packs}=await api('/api/packs'); byId('packs').innerHTML=packs.map(pack=>`<article class="pack"><div class="pack-banner"><span class="rarity">${esc(pack.status)}</span><h3>${esc(pack.name)}</h3></div><div class="pack-body"><div class="pack-meta"><strong>${pack.pricePoints.toLocaleString()} pt</strong><span>${pack.remaining} / ${pack.totalSlots}</span></div><div class="actions"><button class="btn" data-detail="${esc(pack.id)}">詳細</button><button class="btn primary" data-draw="${esc(pack.id)}" data-quantity="1" ${pack.remaining<1?'disabled':''}>1口</button><button class="btn" data-draw="${esc(pack.id)}" data-quantity="10" ${pack.remaining<10?'disabled':''}>10口</button><button class="btn" data-draw="${esc(pack.id)}" data-quantity="all" ${pack.remaining<1?'disabled':''}>全口</button></div></div></article>`).join(''); }
     byId('packs').addEventListener('click',event=>{ const draw=event.target.closest('[data-draw]'); const detail=event.target.closest('[data-detail]'); if(draw)runDraw(draw.dataset.draw,draw.dataset.quantity); if(detail)showDetail(detail.dataset.detail); });
@@ -173,7 +176,8 @@
     byId('card-import-form').addEventListener('submit',async event=>{event.preventDefault();try{const data=await api('/api/admin/cards/import',{method:'POST',body:JSON.stringify({csv:byId('card-csv').value,reason:byId('card-import-reason').value})});toast(`${data.count}枚を登録しました`);event.target.reset();}catch(error){toast(error.message,true);}});
     byId('pack-form').addEventListener('submit',async event=>{event.preventDefault();try{let slots=JSON.parse(byId('pack-slots').value);const data=await api('/api/admin/packs',{method:'POST',body:JSON.stringify({name:byId('pack-name').value,slug:byId('pack-slug').value,pricePoints:Number(byId('pack-price').value),totalSlots:Number(byId('pack-total').value),description:byId('pack-description').value,slots,reason:byId('pack-reason').value})});toast(`下書きパック ${data.pack.id} を作成しました`);event.target.reset();}catch(error){toast(error.message,true);}});
     document.querySelectorAll('[data-close]').forEach(button=>button.addEventListener('click',()=>byId(button.dataset.close).close()));
-    if(token)enterApp().catch(()=>{token='';sessionStorage.removeItem('gacha-token');location.reload();});
+    if(surface==='admin'){ document.title='ORIPA DECK 管理画面'; byId('auth-title').textContent='管理画面'; byId('login-otp').required=true; }
+    if(token)enterApp().catch(()=>{token='';sessionStorage.removeItem(tokenKey);location.reload();});
   </script>
 </body>
 </html>

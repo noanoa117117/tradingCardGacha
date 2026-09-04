@@ -120,7 +120,17 @@ export class Store {
       }
     }
     this.migrateAdminModel();
+    this.ensureDevelopmentDemoUser();
     this.lock = Promise.resolve();
+  }
+  ensureDevelopmentDemoUser() {
+    if (process.env.ADMIN_ENV === 'production' || this.state.users.some(user => user.email === 'demo@example.com')) return;
+    const credentials = passwordHash('demo-user-password');
+    const createdAt = new Date().toISOString();
+    const user = { id:'usr_demo', email:'demo@example.com', phone:'', birthDate:'1990-01-01', passwordSalt:credentials.salt, passwordHash:credentials.hash, points:10000, role:'user', status:'active', createdAt };
+    this.state.users.push(user);
+    this.state.pointTransactions.push({ id:id('ptx'), userId:user.id, amount:10000, balanceAfter:10000, type:'demo_seed', metadata:{}, createdAt });
+    this.persist();
   }
   migrateAdminModel() {
     const legacy = this.state.users.find(u => u.role === 'admin' || u.email === 'admin@example.com');
@@ -169,7 +179,7 @@ export class Store {
   login(email, password) {
     const user = this.state.users.find(u => u.email === String(email).trim().toLowerCase());
     if (!user || !passwordMatches(password, user) || user.status === 'frozen' || user.status === 'deleted') throw new Error('invalid credentials');
-    if (this.state.adminUsers.some(a => a.userId === user.id)) throw new Error('admin login requires 2FA');
+    if (this.state.adminUsers.some(a => a.userId === user.id)) throw new Error('admin account must use /admin');
     const token = crypto.randomBytes(32).toString('base64url');
     this.state.sessions = this.state.sessions.filter(s => s.userId !== user.id);
     this.state.sessions.push({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 7 * 86400000).toISOString() });
