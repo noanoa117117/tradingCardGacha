@@ -5,6 +5,56 @@ import crypto from 'node:crypto';
 const DATA_FILE = process.env.GACHA_DATA_FILE || path.join(process.cwd(), 'data', 'store.json');
 const clone = value => JSON.parse(JSON.stringify(value));
 const id = prefix => `${prefix}_${crypto.randomBytes(10).toString('hex')}`;
+const DEFAULT_DEV_TOTP_SECRET = 'JBSWY3DPEHPK3PXP';
+export function drawLogCsv(draws) {
+  const headers = ['id','userId','packId','slotId','cardId','rarity','remainingBefore','remainingAfter','createdAt','previousHash','hash'];
+  const csvValue = value => { const text = String(value ?? ''); const safe = /^[=+\-@]/.test(text) ? `'${text}` : text; return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"','""')}"` : safe; };
+  return [headers, ...draws.map(draw => headers.map(key => csvValue(draw[key])))].map(row => row.join(',')).join('\r\n') + '\r\n';
+}
+const PACK_STATUSES = new Set(['draft', 'scheduled', 'selling', 'sold_out', 'stopped']);
+const CARD_HEADERS = ['id','name','modelNumber','rarity','imageUrl','thumbnailUrl','redeemPoints','marketPriceMemo','conditionRank'];
+export function cardCsv(cards) {
+  const csvValue = value => { const text=String(value ?? ''); const safe=/^[=+\-@]/.test(text) ? `'${text}` : text; return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"','""')}"` : safe; };
+  return [CARD_HEADERS, ...cards.map(card=>CARD_HEADERS.map(key=>csvValue(card[key])))].map(row=>row.join(',')).join('\r\n')+'\r\n';
+}
+export function shipmentLabelCsv(shipments, state = null) {
+  const csvValue = value => { const text=String(value ?? ''); const safe=/^[=+\-@]/.test(text) ? `'${text}` : text; return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"','""')}"` : safe; };
+  const headers=['shipmentId','status','trackingNumber','createdAt','recipient','postalCode','prefecture','city','line1','line2','phone','cards'];
+  const rows = shipments.map(shipment => {
+    const address = state?.addresses?.find(a=>a.id===shipment.addressId) || shipment.address || {};
+    const ids = state ? state.shipmentItems.filter(i=>i.shipmentId===shipment.id).map(i=>i.userCardId) : (shipment.userCardIds || []);
+    const cards = state ? ids.map(uid=>{ const uc=state.userCards.find(c=>c.id===uid); const card=uc&&state.cards.find(c=>c.id===uc.cardId); return card ? `${card.name} (${card.rarity})` : uid; }).join(' | ') : ids.join(' | ');
+    return [shipment.id,shipment.status,shipment.trackingNumber,shipment.createdAt,address.name,address.postalCode,address.prefecture,address.city,address.line1,address.line2,address.phone,cards].map(csvValue);
+  });
+  return [headers,...rows].map(row=>row.join(',')).join('\r\n')+'\r\n';
+}
+function parseCsv(text) {
+  const rows=[]; let row=[], field='', quoted=false;
+  for(let i=0;i<text.length;i++){ const ch=text[i]; if(quoted){ if(ch==='"'&&text[i+1]==='"'){field+='"';i++;} else if(ch==='"')quoted=false; else field+=ch; } else if(ch==='"'&&field===''){quoted=true;} else if(ch===','){row.push(field);field='';} else if(ch==='\n'){row.push(field.replace(/\r$/,''));field='';if(row.some(x=>x!==''))rows.push(row);row=[];} else field+=ch; }
+  if(field||row.length){row.push(field.replace(/\r$/,''));if(row.some(x=>x!==''))rows.push(row);}
+  if(!rows.length)return []; const header=rows.shift().map((x,index)=>index===0?x.replace(/^\uFEFF/,'').trim():x.trim()); return rows.map(values=>Object.fromEntries(header.map((key,index)=>[key,values[index]??''])));
+}
+function validRank(value) { return /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(String(value)); }
+function isSafeMediaUrl(value) { return /^https:\/\//i.test(String(value)) || /^data:(?:image|video)\/(?:png|jpeg|jpg|webp|svg\+xml|mp4|webm);base64,[A-Za-z0-9+/=_-]+$/i.test(String(value)); }
+function normalizeCard(card = {}, { partial = false } = {}) {
+  if (partial && card.name === undefined && card.rarity === undefined && card.redeemPoints === undefined && card.modelNumber === undefined) return {};
+  const name=card.name === undefined && partial ? undefined : String(card.name||'').trim(); const rarity=card.rarity === undefined && partial ? undefined : String(card.rarity||'').trim();
+  const redeemPoints=card.redeemPoints === undefined && partial ? undefined : Number(card.redeemPoints);
+  if ((!partial && (!name || !validRank(rarity) || !Number.isInteger(redeemPoints)||redeemPoints<0)) || (partial && ((name!==undefined&&!name)||(rarity!==undefined&&!validRank(rarity))||(redeemPoints!==undefined&&(!Number.isInteger(redeemPoints)||redeemPoints<0))))) return null;
+  const item={}; if(name!==undefined)item.name=name; if(rarity!==undefined)item.rarity=rarity; if(redeemPoints!==undefined)item.redeemPoints=redeemPoints;
+  for(const key of ['modelNumber','imageUrl','thumbnailUrl','marketPriceMemo','conditionRank']) if(card[key]!==undefined) { if(card[key]!==null && String(card[key]).length>10000) return null; item[key]=card[key]===null?null:String(card[key]); }
+  if(item.imageUrl && !isSafeMediaUrl(item.imageUrl)) return null; if(item.thumbnailUrl && !isSafeMediaUrl(item.thumbnailUrl)) return null;
+  if(item.imageUrl && !item.thumbnailUrl) item.thumbnailUrl=item.imageUrl;
+  return item;
+}
+function normalizeSlotRows(slots) {
+  if(!Array.isArray(slots)) return [];
+  const rows=[]; for(const slot of slots){ if(typeof slot==='string') rows.push({cardId:slot,count:1,effectRank:null}); else if(slot && typeof slot==='object') rows.push({cardId:String(slot.cardId||''),count:Number(slot.count ?? slot.quantity ?? 0),effectRank:slot.effectRank ? String(slot.effectRank) : null}); }
+  const merged=new Map(); for(const row of rows){ if(!row.cardId) continue; const key=`${row.cardId}\u0000${row.effectRank||''}`; const prior=merged.get(key); if(prior)prior.count+=row.count; else merged.set(key,row); } return [...merged.values()];
+}
+function materializePackSlots(state, pack) {
+  let index=0; for(const row of pack.slotRows || []) { const card=state.cards.find(c=>c.id===row.cardId); for(let n=0;n<row.count;n++) state.packSlots.push({id:`${pack.id}_slot_${++index}`,packId:pack.id,cardId:row.cardId,rarity:card.rarity,effectRank:row.effectRank||null,drawnAt:null}); }
+}
 
 function passwordHash(password, salt = crypto.randomBytes(16).toString('hex')) {
   return { salt, hash: crypto.scryptSync(password, salt, 32).toString('hex') };
@@ -14,8 +64,27 @@ function passwordMatches(password, user) {
   return crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(user.passwordHash, 'hex'));
 }
 function emptyState() {
-  return { users: [], sessions: [], cards: [], packs: [], packSlots: [], draws: [], userCards: [], pointTransactions: [] };
+  return { users: [], sessions: [], adminUsers: [], adminSessions: [], adminAuditLogs: [], cards: [], packs: [], packSlots: [], draws: [], userCards: [], pointTransactions: [], effectRanks: [], effectVideos: [], addresses: [], shipments: [], shipmentItems: [], payments: [], bankTransfers: [], siteSettings: {}, announcements: [] };
 }
+
+const adminKey = () => { if (process.env.ADMIN_ENV === 'production' && !process.env.ADMIN_2FA_KEY) throw new Error('ADMIN_2FA_KEY is required in production'); return crypto.createHash('sha256').update(String(process.env.ADMIN_2FA_KEY || 'local-dev-admin-key-change-me')).digest(); };
+function encryptSecret(secret) {
+  const iv = crypto.randomBytes(12); const cipher = crypto.createCipheriv('aes-256-gcm', adminKey(), iv);
+  const data = Buffer.concat([cipher.update(String(secret), 'utf8'), cipher.final()]);
+  return `v1.${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${data.toString('base64url')}`;
+}
+function decryptSecret(value) {
+  try { const [, iv, tag, data] = String(value).split('.'); const decipher = crypto.createDecipheriv('aes-256-gcm', adminKey(), Buffer.from(iv, 'base64url')); decipher.setAuthTag(Buffer.from(tag, 'base64url')); return Buffer.concat([decipher.update(Buffer.from(data, 'base64url')), decipher.final()]).toString('utf8'); } catch { return null; }
+}
+function base32Decode(value) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; let bits = ''; for (const c of String(value).toUpperCase().replace(/=+$/, '').replace(/\s/g, '')) { const n = alphabet.indexOf(c); if (n < 0) return null; bits += n.toString(2).padStart(5, '0'); }
+  const out = []; for (let i = 0; i + 8 <= bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(out);
+}
+function randomBase32(bytes = 20) { const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; const raw = crypto.randomBytes(bytes); let bits = ''; for (const value of raw) bits += value.toString(2).padStart(8, '0'); let out = ''; for (let i = 0; i < bits.length; i += 5) out += alphabet[parseInt(bits.slice(i, i + 5).padEnd(5, '0'), 2)]; return out; }
+function totp(secret, timestamp = Date.now()) {
+  const key = base32Decode(secret); if (!key) return null; const counter = Math.floor(timestamp / 30000); const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(counter)); const digest = crypto.createHmac('sha1', key).update(b).digest(); const offset = digest.at(-1) & 15; const code = ((digest.readUInt32BE(offset) & 0x7fffffff) % 1000000).toString().padStart(6, '0'); return code;
+}
+function validTotp(secret, otp) { if (!/^\d{6}$/.test(String(otp))) return false; for (let skew = -1; skew <= 1; skew++) { const code = totp(secret, Date.now() + skew * 30000); if (code && crypto.timingSafeEqual(Buffer.from(code), Buffer.from(String(otp)))) return true; } return false; }
 function ageAtLeast18(date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) return false;
   const birth = new Date(`${date}T00:00:00Z`);
@@ -34,11 +103,36 @@ function hashDraw(previousHash, draw) {
 }
 
 export class Store {
-  constructor(file = DATA_FILE) {
+  constructor(file = DATA_FILE, options = {}) {
     this.file = file;
     this.state = this.load();
-    for (const key of ['addresses', 'shipments', 'shipmentItems', 'effectVideos']) this.state[key] ||= [];
+    for (const key of ['addresses', 'shipments', 'shipmentItems', 'effectRanks', 'effectVideos', 'adminUsers', 'adminSessions', 'adminAuditLogs', 'payments', 'bankTransfers', 'announcements']) this.state[key] ||= [];
+    this.state.siteSettings ||= {};
+    this.paymentProvider = options.paymentProvider || null;
+    for (const pack of this.state.packs) {
+      pack.status ||= 'selling'; pack.displayOrder ??= this.state.packs.indexOf(pack);
+      if (['selling', 'sold_out'].includes(pack.status)) pack.saleStartedAt ||= pack.createdAt || new Date().toISOString();
+      pack.totalSlots = Number.isInteger(pack.totalSlots) ? pack.totalSlots : this.state.packSlots.filter(s => s.packId === pack.id).length;
+      pack.configuredSlots ??= this.state.packSlots.filter(s => s.packId === pack.id).length;
+      if (!Array.isArray(pack.slotRows) || !pack.slotRows.length) {
+        const grouped = new Map(); for (const slot of this.state.packSlots.filter(s=>s.packId===pack.id)) { const key=`${slot.cardId}\u0000${slot.effectRank||''}`; const row=grouped.get(key); if(row) row.count++; else grouped.set(key,{cardId:slot.cardId,count:1,effectRank:slot.effectRank||null}); }
+        pack.slotRows=[...grouped.values()];
+      }
+    }
+    this.migrateAdminModel();
     this.lock = Promise.resolve();
+  }
+  migrateAdminModel() {
+    const legacy = this.state.users.find(u => u.role === 'admin' || u.email === 'admin@example.com');
+    if (!legacy) return;
+    legacy.role = 'owner';
+    if (!this.state.adminUsers.some(a => a.userId === legacy.id)) {
+      if (process.env.ADMIN_ENV === 'production' && !process.env.ADMIN_2FA_SECRET) throw new Error('ADMIN_2FA_SECRET is required for initial production admin setup');
+      const secret = process.env.ADMIN_2FA_SECRET || DEFAULT_DEV_TOTP_SECRET;
+      const allowedIps = String(process.env.ADMIN_ALLOWED_IPS || '').split(',').map(x => x.trim()).filter(Boolean);
+      this.state.adminUsers.push({ id: id('adm'), userId: legacy.id, email: legacy.email, role: 'owner', allowedIps, twoFactorSecretEnc: encryptSecret(secret), twoFactorEnabled: true, createdAt: new Date().toISOString() });
+      this.persist();
+    }
   }
   load() {
     try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); }
@@ -59,30 +153,65 @@ export class Store {
     this.lock = run.catch(() => {});
     return run;
   }
-  register({ email, password, birthDate, ageConfirmed }) {
+  register({ email, password, birthDate, ageConfirmed, phone = '' }) {
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length < 8 || !birthDate || !ageConfirmed || !ageAtLeast18(birthDate)) {
       throw new Error('email, password (8+ chars), valid birthDate and age confirmation are required');
     }
     email = email.trim().toLowerCase();
     if (this.state.users.some(u => u.email === email)) throw new Error('email already registered');
     const userId = id('usr'); const p = passwordHash(password);
-    this.state.users.push({ id: userId, email, birthDate, passwordSalt: p.salt, passwordHash: p.hash, points: 0, role: 'user', createdAt: new Date().toISOString() });
+    const normalizedPhone = phone == null ? '' : String(phone).trim();
+    if (normalizedPhone.length > 40) throw new Error('invalid phone');
+    this.state.users.push({ id: userId, email, phone: normalizedPhone, birthDate, passwordSalt: p.salt, passwordHash: p.hash, points: 0, role: 'user', status: 'active', createdAt: new Date().toISOString() });
     this.persist();
     return this.state.users.at(-1);
   }
   login(email, password) {
     const user = this.state.users.find(u => u.email === String(email).trim().toLowerCase());
-    if (!user || !passwordMatches(password, user)) throw new Error('invalid credentials');
+    if (!user || !passwordMatches(password, user) || user.status === 'frozen' || user.status === 'deleted') throw new Error('invalid credentials');
+    if (this.state.adminUsers.some(a => a.userId === user.id)) throw new Error('admin login requires 2FA');
     const token = crypto.randomBytes(32).toString('base64url');
     this.state.sessions = this.state.sessions.filter(s => s.userId !== user.id);
     this.state.sessions.push({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 7 * 86400000).toISOString() });
     this.persist();
     return { token, user: publicUser(user) };
   }
+  adminLogin(email, password, otp, { ip = 'unknown', environment = process.env.ADMIN_ENV || 'development' } = {}) {
+    const admin = this.state.adminUsers.find(a => a.email === String(email).trim().toLowerCase()); const user = admin && this.state.users.find(u => u.id === admin.userId);
+    if (!admin || !user || user.status === 'frozen' || user.status === 'deleted' || !passwordMatches(password, user) || !admin.twoFactorEnabled) throw new Error('invalid admin credentials');
+    if (admin.allowedIps?.length && !admin.allowedIps.includes(ip)) throw new Error('admin IP not allowed');
+    const secret = decryptSecret(admin.twoFactorSecretEnc); if (!secret || !validTotp(secret, otp)) throw new Error('2FA verification required');
+    const token = crypto.randomBytes(32).toString('base64url'); const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+    this.state.adminSessions = this.state.adminSessions.filter(s => s.adminUserId !== admin.id); this.state.adminSessions.push({ token, adminUserId: admin.id, userId: user.id, ip, environment, createdAt: new Date().toISOString(), expiresAt }); this.persist();
+    return { token, expiresAt, environment, user: { ...publicUser(user), role: admin.role } };
+  }
+  adminForToken(token, { ip = 'unknown', environment = process.env.ADMIN_ENV || 'development' } = {}) {
+    const session = this.state.adminSessions.find(s => s.token === token); if (!session) return null;
+    if (Date.parse(session.expiresAt) <= Date.now() || session.environment !== environment || (session.ip !== 'unknown' && session.ip !== ip)) { this.state.adminSessions = this.state.adminSessions.filter(s => s !== session); this.persist(); return null; }
+    const admin = this.state.adminUsers.find(a => a.id === session.adminUserId); const user = admin && this.state.users.find(u => u.id === admin.userId); return admin && user ? { ...admin, user } : null;
+  }
+  adminLogout(token) { this.state.adminSessions = this.state.adminSessions.filter(s => s.token !== token); this.persist(); }
+  appendAudit({ actor, action, target, before = null, after = null, ip = 'unknown', reason = '' }, { persist = true } = {}) {
+    if (!actor || !action || !target) throw new Error('audit fields required');
+    const entry = { id: id('audit'), actor: typeof actor === 'string' ? actor : actor.id, action, target, before: before == null ? null : clone(before), after: after == null ? null : clone(after), ip, reason: String(reason || ''), createdAt: new Date().toISOString() };
+    this.state.adminAuditLogs.push(entry); if (persist) this.persist(); return entry;
+  }
+  adminUser(email) { return this.state.adminUsers.find(a => a.email === String(email).trim().toLowerCase()); }
+  createAdminUser({ email, password, role = 'viewer', birthDate = '1980-01-01' } = {}) {
+    email = String(email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length < 8 || !['owner', 'operator', 'viewer'].includes(role)) throw new Error('invalid admin user');
+    if (this.state.adminUsers.some(a => a.email === email) || this.state.users.some(u => u.email === email)) throw new Error('email already registered');
+    const userId = id('usr'); const p = passwordHash(password); const user = { id: userId, email, phone: '', birthDate, passwordSalt: p.salt, passwordHash: p.hash, points: 0, role, status: 'active', createdAt: new Date().toISOString() }; this.state.users.push(user);
+    const secret = randomBase32(); const admin = { id: id('adm'), userId, email, role, allowedIps: [], twoFactorSecretEnc: encryptSecret(secret), twoFactorEnabled: true, createdAt: new Date().toISOString() }; this.state.adminUsers.push(admin); this.persist();
+    return { ...admin, user: publicUser(user), twoFactorSecret: secret, twoFactorSecretEnc: undefined };
+  }
+  provisionAdminTwoFactor(adminId) { const admin = this.state.adminUsers.find(a => a.id === adminId); if (!admin) throw new Error('admin not found'); const secret = randomBase32(); admin.twoFactorSecretEnc = encryptSecret(secret); admin.twoFactorEnabled = true; this.persist(); return { id: admin.id, secret }; }
+  setAdminIpAllowlist(adminId, allowedIps) { const admin = this.state.adminUsers.find(a => a.id === adminId); if (!admin || !Array.isArray(allowedIps) || allowedIps.some(ip => typeof ip !== 'string' || ip.length > 64)) throw new Error('invalid IP allowlist'); admin.allowedIps = [...new Set(allowedIps)]; this.persist(); return { ...admin, twoFactorSecretEnc: undefined }; }
   userForToken(token) {
     const session = this.state.sessions.find(s => s.token === token);
     if (session && session.expiresAt && Date.parse(session.expiresAt) <= Date.now()) { this.state.sessions = this.state.sessions.filter(s => s !== session); this.persist(); return null; }
-    return session && this.state.users.find(u => u.id === session.userId);
+    const user = session ? (this.state.users.find(u => u.id === session.userId) || null) : null;
+    return user && user.status !== 'frozen' && user.status !== 'deleted' ? user : null;
   }
   logout(token) { this.state.sessions = this.state.sessions.filter(s => s.token !== token); this.persist(); }
   addPoints(userId, amount, type = 'admin_grant', metadata = {}) {
@@ -93,11 +222,80 @@ export class Store {
     this.state.pointTransactions.push({ id: id('ptx'), userId, amount, balanceAfter: user.points, type, metadata, createdAt: new Date().toISOString() });
     return user.points;
   }
+  async adjustPointsByAdmin({ userId, amount, reason, adminId, ip = 'unknown' } = {}) {
+    return this.atomic(state => {
+      if (!Number.isInteger(amount) || amount === 0) throw new Error('amount must be a non-zero integer');
+      if (typeof reason !== 'string' || !reason.trim()) throw new Error('operation reason is required');
+      const user = state.users.find(u => u.id === userId && u.role === 'user'); if (!user) throw new Error('user not found');
+      const before = user.points;
+      if (before + amount < 0) throw new Error('insufficient points');
+      user.points += amount;
+      const now = new Date().toISOString();
+      const transaction = { id: id('ptx'), userId, amount, balanceBefore: before, balanceAfter: user.points, type: 'admin_operation', metadata: { adminId, reason: reason.trim() }, createdAt: now };
+      state.pointTransactions.push(transaction);
+      this.appendAudit({ actor: adminId, action: 'points.adjust', target: `user:${userId}`, before: { points: before }, after: { points: user.points }, ip, reason: reason.trim() }, { persist: false });
+      return { balance: user.points, transaction };
+    });
+  }
+  searchUsers({ q = '', email = '', userId = '', id: idValue = '', phone = '' } = {}) {
+    const terms = [q, email, userId || idValue, phone].map(value => String(value || '').trim().toLowerCase());
+    if (!terms.some(Boolean)) return this.state.users.filter(u => u.role === 'user');
+    return this.state.users.filter(u => {
+      if (u.role !== 'user') return false;
+      const values = [u.email, u.id, u.phone || ''].map(value => String(value).toLowerCase());
+      return terms.every(term => !term || values.some(value => value.includes(term)));
+    });
+  }
+  userDetails(userId) {
+    const user = this.state.users.find(u => u.id === userId && u.role === 'user'); if (!user) throw new Error('user not found');
+    const draws = this.state.draws.filter(d => d.userId === userId);
+    const userCards = this.state.userCards.filter(c => c.userId === userId).map(c => ({ ...c, card: publicCard(this.state.cards.find(card => card.id === c.cardId)) }));
+    const shipments = this.listShipments({ userId });
+    return { user: { ...publicUser(user), phone: user.phone || '', status: user.status || 'active', createdAt: user.createdAt }, points: user.points, pointTransactions: this.state.pointTransactions.filter(t => t.userId === userId), draws, userCards, shipments };
+  }
+  async setUserStatus(userId, status, { adminId, ip = 'unknown', reason } = {}) {
+    return this.atomic(state => {
+      if (status === 'withdrawn') status = 'deleted';
+      if (!['active', 'frozen', 'deleted'].includes(status)) throw new Error('invalid user status');
+      if (typeof reason !== 'string' || !reason.trim()) throw new Error('operation reason is required');
+      const user = state.users.find(u => u.id === userId && u.role === 'user'); if (!user) throw new Error('user not found');
+      const before = user.status || 'active'; if (before === 'deleted' && status !== 'deleted') throw new Error('deleted user cannot be restored');
+      user.status = status; if (status === 'deleted') user.deletedAt = new Date().toISOString();
+      if (status !== 'active') state.sessions = state.sessions.filter(s => s.userId !== userId);
+      this.appendAudit({ actor: adminId, action: `user.${status === 'frozen' ? 'freeze' : status === 'active' ? 'unfreeze' : 'delete'}`, target: `user:${userId}`, before: { status: before }, after: { status }, ip, reason: reason.trim() }, { persist: false });
+      return this.userDetails(userId);
+    });
+  }
+  async freezeUser(userId, options = {}) { return this.setUserStatus(userId, 'frozen', options); }
+  async unfreezeUser(userId, options = {}) { return this.setUserStatus(userId, 'active', options); }
+  async withdrawUser(userId, options = {}) { return this.setUserStatus(userId, 'deleted', options); }
+  adminInventory() {
+    return this.state.packs.map(pack => {
+      const slots = this.state.packSlots.filter(s => s.packId === pack.id);
+      const remaining = slots.filter(s => !s.drawnAt);
+      const rareRemaining = {};
+      for (const slot of remaining) if (!['N', 'R'].includes(slot.rarity)) rareRemaining[slot.rarity] = (rareRemaining[slot.rarity] || 0) + 1;
+      return { id: pack.id, slug: pack.slug, name: pack.name, status: pack.status, totalSlots: pack.totalSlots ?? slots.length, configuredSlots: slots.length, remaining: remaining.length, rareRemaining, rareRemainingByRarity: rareRemaining };
+    });
+  }
+  searchDraws({ userId = '', packId = '', from = '', to = '', rarity = '' } = {}) {
+    const fromMs = from ? Date.parse(from) : NaN; const toMs = to ? Date.parse(to) : NaN;
+    return this.state.draws.filter(draw => {
+      const at = Date.parse(draw.createdAt);
+      return (!userId || draw.userId === userId) && (!packId || draw.packId === packId) && (!rarity || draw.rarity === rarity) && (Number.isNaN(fromMs) || at >= fromMs) && (Number.isNaN(toMs) || at <= toMs);
+    });
+  }
+  detectDrawAnomalies({ windowMs = 24 * 60 * 60 * 1000, minHighValue = 1000, threshold = 3 } = {}) {
+    const now = Date.now(); const byUser = new Map();
+    for (const draw of this.state.draws) { if (Date.parse(draw.createdAt) < now - windowMs) continue; const card = this.state.cards.find(c => c.id === draw.cardId); if (!card || card.redeemPoints < minHighValue) continue; const list = byUser.get(draw.userId) || []; list.push(draw); byUser.set(draw.userId, list); }
+    return [...byUser].filter(([, draws]) => draws.length >= threshold).map(([userId, draws]) => ({ userId, count: draws.length, drawIds: draws.map(d => d.id), windowMs, minHighValue }));
+  }
   async draw(userId, packId, quantity = 1) {
     return this.atomic(state => {
       if (!Number.isInteger(quantity) || quantity < 1) throw new Error('quantity must be a positive integer');
       const user = state.users.find(u => u.id === userId); const pack = state.packs.find(p => p.id === packId);
       if (!user || !pack) throw new Error('user or pack not found');
+      if (pack.status === 'scheduled' && Date.parse(pack.startsAt) <= Date.now()) { pack.status = 'selling'; pack.saleStartedAt ||= new Date().toISOString(); }
       if (pack.status !== 'selling') throw new Error('pack is not available');
       const available = state.packSlots.filter(s => s.packId === packId && !s.drawnAt);
       if (available.length < quantity) throw new Error(`only ${available.length} slot(s) remain`);
@@ -119,8 +317,10 @@ export class Store {
         state.draws.push(draw);
         const userCard = { id: id('uc'), userId, cardId: card.id, drawId: draw.id, status: 'unprocessed', obtainedAt: slot.drawnAt };
         state.userCards.push(userCard);
-        const effect = state.effectVideos?.find(e => e.rarity === card.rarity) || null;
-        results.push({ draw, card: publicCard(card), userCard, effect: effect ? { rarity: effect.rarity, url: effect.url, label: effect.label } : { rarity: card.rarity, url: null, label: 'default animation' } });
+        const effectRank = slot.effectRank || card.rarity;
+        const fallbackRank = state.effectRanks?.find(r=>r.name===effectRank)?.fallbackRank;
+        const effect = state.effectVideos?.find(e => e.rarity === effectRank && e.url) || (fallbackRank && state.effectVideos?.find(e=>e.rarity===fallbackRank && e.url)) || state.effectVideos?.find(e => e.fallback && e.url) || null;
+        results.push({ draw, card: publicCard(card), userCard, effect: effect ? { rarity: effect.rarity, url: effect.url, label: effect.label } : { rarity: effectRank, url: null, label: 'default animation' } });
       }
       if (!state.packSlots.some(s => s.packId === packId && !s.drawnAt)) pack.status = 'sold_out';
       return { balance: user.points, results };
@@ -144,16 +344,202 @@ export class Store {
   }
   async addAddress(userId, address) { return this.atomic(state => { if (!address || !address.name || !address.postalCode || !address.prefecture || !address.city || !address.line1) throw new Error('complete address required'); const { name, postalCode, prefecture, city, line1, line2 = '', phone = '', isDefault = false } = address; if (isDefault) state.addresses.filter(a => a.userId === userId).forEach(a => { a.isDefault = false; }); const item={id:id('addr'),userId,name,postalCode,prefecture,city,line1,line2,phone,isDefault:Boolean(isDefault),createdAt:new Date().toISOString()}; state.addresses.push(item); return item; }); }
   async createShipment(userId, userCardIds, addressId) { return this.atomic(state => { if(!Array.isArray(userCardIds)||!userCardIds.length||new Set(userCardIds).size!==userCardIds.length) throw new Error('invalid or duplicate card list'); const address=state.addresses.find(a=>a.id===addressId&&a.userId===userId); if(!address)throw new Error('address not found'); const cards=userCardIds.map(cardId=>state.userCards.find(c=>c.id===cardId&&c.userId===userId)); if(cards.some(c=>!c))throw new Error('card not found'); if(cards.some(c=>c.status!=='unprocessed'))throw new Error('card is not shippable'); const shipment={id:id('shp'),userId,addressId,status:'requested',createdAt:new Date().toISOString()}; state.shipments.push(shipment); cards.forEach(c=>{c.status='shipping_requested'; state.shipmentItems.push({id:id('shi'),shipmentId:shipment.id,userCardId:c.id});}); return {...shipment,userCardIds}; }); }
-  async createPack({ slug, name, pricePoints, slots }) { return this.atomic(state => { if (!slug || !name || !Number.isInteger(pricePoints) || pricePoints < 1 || !Array.isArray(slots) || !slots.length) throw new Error('invalid pack'); const idValue=id('pack'); const pack={id:idValue,slug,name,pricePoints,totalSlots:slots.length,status:'selling',createdAt:new Date().toISOString()}; state.packs.push(pack); slots.forEach((cardId, index) => { if(!state.cards.some(c=>c.id===cardId)) throw new Error('card not found'); state.packSlots.push({id:`${idValue}_slot_${index+1}`,packId:idValue,cardId,rarity:state.cards.find(c=>c.id===cardId).rarity,drawnAt:null}); }); return pack; }); }
-  async createCard(card) { return this.atomic(state => { const redeemPoints=Number(card.redeemPoints); if(!card.name || !['N','R','SR','SSR'].includes(card.rarity) || !Number.isInteger(redeemPoints) || redeemPoints < 0) throw new Error('invalid card'); const item={id:id('card'),name:String(card.name).trim(),rarity:card.rarity,imageUrl:card.imageUrl || null,redeemPoints}; state.cards.push(item); return item; }); }
-  async setEffect(effect) { return this.atomic(state => { if(!['N','R','SR','SSR'].includes(effect.rarity)) throw new Error('valid rarity required'); if (effect.url && !/^https?:\/\//.test(effect.url)) throw new Error('effect URL must use http or https'); const existing=state.effectVideos.find(x=>x.rarity===effect.rarity); if(existing) { existing.url=effect.url || null; existing.label=effect.label || existing.label; return existing; } const item={id:id('effect'),rarity:effect.rarity,url:effect.url || null,label:effect.label || `${effect.rarity} effect`}; state.effectVideos.push(item); return item; }); }
+  async updateShipment(shipmentId, { status, trackingNumber } = {}) {
+    return this.atomic(state => {
+      const allowed = new Set(['requested', 'processing', 'shipped', 'canceled']);
+      if (!allowed.has(status)) throw new Error('invalid shipment status');
+      if (trackingNumber !== undefined && (typeof trackingNumber !== 'string' || trackingNumber.length > 100)) throw new Error('invalid tracking number');
+      const shipment = state.shipments.find(item => item.id === shipmentId);
+      if (!shipment) throw new Error('shipment not found');
+      if (shipment.status === 'shipped' && status !== 'shipped') throw new Error('shipped shipment cannot change status');
+      if (shipment.status === 'canceled' && status !== 'canceled') throw new Error('canceled shipment cannot change status');
+      shipment.status = status;
+      if (trackingNumber !== undefined) shipment.trackingNumber = trackingNumber.trim() || null;
+      const items = state.shipmentItems.filter(item => item.shipmentId === shipment.id);
+      const cards = items.map(item => state.userCards.find(card => card.id === item.userCardId)).filter(Boolean);
+      if (status === 'shipped') cards.forEach(card => { card.status = 'shipped'; card.shippedAt ||= new Date().toISOString(); });
+      if (status === 'canceled') cards.forEach(card => { if (card.status === 'shipping_requested') card.status = 'unprocessed'; });
+      return { ...shipment, userCardIds: items.map(item => item.userCardId) };
+    });
+  }
+  listShipments({ status = '', userId = '' } = {}) {
+    return this.state.shipments.filter(s => (!status || s.status === status) && (!userId || s.userId === userId)).map(s => {
+      const address = this.state.addresses.find(a => a.id === s.addressId);
+      const items = this.state.shipmentItems.filter(i => i.shipmentId === s.id);
+      const cards = items.map(i => { const uc=this.state.userCards.find(c=>c.id===i.userCardId); const card=uc&&this.state.cards.find(c=>c.id===uc.cardId); return { userCardId:i.userCardId, card:card ? publicCard(card) : null }; });
+      return clone({ ...s, address: address ? {...address} : null, items, cards });
+    });
+  }
+  setPaymentProvider(provider) { this.paymentProvider = provider || null; return this.paymentProvider; }
+  listPayments(userId = '') { return clone(this.state.payments.filter(p => !userId || p.userId === userId).sort((a,b)=>Date.parse(b.createdAt)-Date.parse(a.createdAt))); }
+  async createPayment({ userId, points, amount = 0, currency = 'JPY', stripePaymentId = null, metadata = {} } = {}) {
+    points = Number(points); amount = Number(amount);
+    if (!userId || !Number.isInteger(points) || points < 1 || !Number.isInteger(amount) || amount < 0) throw new Error('invalid payment');
+    let providerResult = null;
+    if (this.paymentProvider?.createPayment) providerResult = await this.paymentProvider.createPayment({ userId, points, amount, currency, metadata });
+    // A client-supplied Stripe ID is only a reference; credit points after an
+    // injected provider/webhook explicitly confirms success.
+    const status = ['paid','succeeded','completed'].includes(providerResult?.status) ? 'paid' : 'pending';
+    const payment = await this.atomic(state => {
+      const item = { id:id('pay'), userId, points, amount, currency:String(currency || 'JPY').toUpperCase(), stripePaymentId:providerResult?.id || stripePaymentId || null, status, refundStatus:null, refundAttempts:0, metadata:clone(metadata || {}), createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+      state.payments.push(item);
+      if (status === 'paid') {
+        const user=state.users.find(u=>u.id===userId); if(!user) throw new Error('user not found'); user.points += points;
+        state.pointTransactions.push({id:id('ptx'),userId,amount:points,balanceAfter:user.points,type:'payment_purchase',metadata:{paymentId:item.id,stripePaymentId:item.stripePaymentId},createdAt:item.createdAt});
+      }
+      return clone(item);
+    });
+    return payment;
+  }
+  async markPaymentPaid(paymentId, { stripePaymentId = null, adminId = null, ip = 'unknown', reason = 'provider confirmation' } = {}) {
+    return this.atomic(state => {
+      const payment=state.payments.find(p=>p.id===paymentId); if(!payment) throw new Error('payment not found');
+      if(payment.status==='refunded') throw new Error('refunded payment cannot be paid');
+      if(payment.status==='paid') return clone(payment);
+      const user=state.users.find(u=>u.id===payment.userId); if(!user) throw new Error('user not found');
+      const before={status:payment.status,points:user.points}; payment.status='paid'; payment.stripePaymentId ||= stripePaymentId; payment.paidAt ||= new Date().toISOString(); payment.updatedAt=new Date().toISOString(); user.points += payment.points;
+      state.pointTransactions.push({id:id('ptx'),userId:user.id,amount:payment.points,balanceAfter:user.points,type:'payment_purchase',metadata:{paymentId:payment.id,stripePaymentId:payment.stripePaymentId},createdAt:payment.updatedAt});
+      if(adminId) this.appendAudit({actor:adminId,action:'payment.mark_paid',target:`payment:${payment.id}`,before,after:{status:payment.status,points:user.points},ip,reason},{persist:false});
+      return clone(payment);
+    });
+  }
+  async refundPayment(paymentId, { adminId, reason, ip = 'unknown' } = {}) {
+    if (!adminId || typeof reason !== 'string' || !reason.trim()) throw new Error('operation reason is required');
+    const refundProvider = this.paymentProvider?.refund || this.paymentProvider?.refundPayment;
+    const marked = await this.atomic(state => {
+      const payment=state.payments.find(p=>p.id===paymentId); if(!payment) throw new Error('payment not found');
+      if(payment.status==='refunded') throw new Error('payment already refunded');
+      if(!['paid','refund_failed','refund_pending'].includes(payment.status)) throw new Error('payment is not refundable');
+      const user=state.users.find(u=>u.id===payment.userId&&u.role==='user'); if(!user) throw new Error('user not found');
+      if (refundProvider && !payment.refundReserved) {
+        if(user.points < payment.points) throw new Error('insufficient points for refund');
+        user.points -= payment.points; const reservationId=id('ptx');
+        state.pointTransactions.push({id:reservationId,userId:user.id,amount:-payment.points,balanceBefore:user.points+payment.points,balanceAfter:user.points,type:'refund_reserve',metadata:{paymentId:payment.id},createdAt:new Date().toISOString()});
+        payment.refundReserved=true; payment.refundReservationTransactionId=reservationId;
+      }
+      payment.status='refund_pending'; payment.refundStatus='pending'; payment.refundAttempts=(payment.refundAttempts||0)+1; payment.updatedAt=new Date().toISOString(); return clone({...payment,idempotencyKey:`refund:${payment.id}`});
+    });
+    try {
+      let providerResult = null;
+      if (refundProvider) providerResult = await refundProvider.call(this.paymentProvider, marked);
+      else throw new Error('payment provider unavailable; refund remains pending');
+      return await this.atomic(state => {
+        const payment=state.payments.find(p=>p.id===paymentId); const user=state.users.find(u=>u.id===payment.userId); if(!user) throw new Error('user not found');
+        if(!payment.refundReserved) throw new Error('refund points are not reserved');
+        const before={status:payment.status,points:user.points+payment.points}; payment.status='refunded'; payment.refundStatus='succeeded'; payment.refundedAt=new Date().toISOString(); payment.providerRefundId=providerResult?.id || null; payment.updatedAt=payment.refundedAt; payment.refundReserved=false;
+        const reservation=state.pointTransactions.find(t=>t.id===payment.refundReservationTransactionId); if(reservation){reservation.type='refund';reservation.metadata.stripeRefundId=payment.providerRefundId;}
+        this.appendAudit({actor:adminId,action:'payment.refund',target:`payment:${payment.id}`,before,after:{status:payment.status,points:user.points},ip,reason:reason.trim()},{persist:false}); return clone(payment);
+      });
+    } catch (error) {
+      await this.atomic(state => { const payment=state.payments.find(p=>p.id===paymentId); if(payment && payment.status==='refund_pending'){ const unavailable=/provider unavailable/.test(String(error.message)); const user=state.users.find(u=>u.id===payment.userId); if(!unavailable&&payment.refundReserved&&user){user.points+=payment.points;state.pointTransactions.push({id:id('ptx'),userId:user.id,amount:payment.points,balanceBefore:user.points-payment.points,balanceAfter:user.points,type:'refund_release',metadata:{paymentId:payment.id,reservationTransactionId:payment.refundReservationTransactionId},createdAt:new Date().toISOString()});payment.refundReserved=false;} payment.status=unavailable?'refund_pending':'refund_failed'; payment.refundStatus=unavailable?'pending':'failed'; payment.refundError=String(error.message); payment.updatedAt=new Date().toISOString(); } });
+      throw error;
+    }
+  }
+  async purchasePoints(input = {}) { return this.createPayment(input); }
+  async recordPayment(paymentId, options = {}) { return this.markPaymentPaid(paymentId, options); }
+  async createBankTransfer({ userId = null, points, amount = 0, reference, metadata = {} } = {}) {
+    points=Number(points); amount=Number(amount); reference=String(reference || '').trim();
+    if(!Number.isInteger(points)||points<1||!Number.isInteger(amount)||amount<0||!reference) throw new Error('invalid bank transfer');
+    return this.atomic(state => { if(state.bankTransfers.some(t=>t.reference===reference)) throw new Error('duplicate transfer reference'); const item={id:id('bank'),userId,points,amount,reference,status:'pending',metadata:clone(metadata),createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()}; state.bankTransfers.push(item); return clone(item); });
+  }
+  async reconcileBankTransfer(transferId, { userId, adminId, reason, ip = 'unknown' } = {}) {
+    if(!adminId || typeof reason!=='string'||!reason.trim()) throw new Error('operation reason is required');
+    return this.atomic(state => { const transfer=state.bankTransfers.find(t=>t.id===transferId); if(!transfer) throw new Error('bank transfer not found'); if(transfer.status==='reconciled') throw new Error('bank transfer already reconciled'); if(!userId) userId=transfer.userId; const user=state.users.find(u=>u.id===userId&&u.role==='user'); if(!user) throw new Error('user not found'); const before={status:transfer.status,userId:transfer.userId,points:user.points}; transfer.userId=userId; transfer.status='reconciled'; transfer.reconciledAt=new Date().toISOString(); transfer.updatedAt=transfer.reconciledAt; user.points += transfer.points; state.pointTransactions.push({id:id('ptx'),userId,amount:transfer.points,balanceAfter:user.points,type:'bank_transfer',metadata:{transferId:transfer.id,reference:transfer.reference,adminId},createdAt:transfer.updatedAt}); this.appendAudit({actor:adminId,action:'bank_transfer.reconcile',target:`bank_transfer:${transfer.id}`,before,after:{status:transfer.status,userId,points:user.points},ip,reason:reason.trim()},{persist:false}); return clone(transfer); });
+  }
+  async updateSiteSettings(patch = {}, { adminId, reason, ip = 'unknown' } = {}) {
+    if(!adminId || typeof reason!=='string'||!reason.trim()) throw new Error('operation reason is required');
+    return this.atomic(state => { const allowed=['announcement','banner','presets','bonusRate','maintenance','termsMarkdown','legalMarkdown']; const before=clone(state.siteSettings); for(const key of allowed) if(patch[key]!==undefined){ if(key==='maintenance') state.siteSettings[key]=Boolean(patch[key]); else if(key==='presets') state.siteSettings[key]=Array.isArray(patch[key])?clone(patch[key]):[]; else if(typeof patch[key]!=='string'&&key!=='bonusRate') throw new Error('invalid site setting'); else state.siteSettings[key]=key==='bonusRate'?Number(patch[key]):String(patch[key]); } state.siteSettings.updatedAt=new Date().toISOString(); this.appendAudit({actor:adminId,action:'site_settings.update',target:'site_settings:global',before,after:state.siteSettings,ip,reason:reason.trim()},{persist:false}); return clone(state.siteSettings); });
+  }
+  async upsertAnnouncement(input = {}, { adminId, reason, ip = 'unknown' } = {}) {
+    if(!adminId || typeof reason!=='string'||!reason.trim()) throw new Error('operation reason is required');
+    return this.atomic(state => { const item=input.id&&state.announcements.find(a=>a.id===input.id); const before=item?clone(item):null; const target=item||{id:id('ann'),createdAt:new Date().toISOString()}; target.title=String(input.title||'').trim(); target.body=String(input.body||''); target.banner=String(input.banner||''); target.published=input.published!==false; target.updatedAt=new Date().toISOString(); if(!target.title) throw new Error('announcement title required'); if(!item) state.announcements.push(target); this.appendAudit({actor:adminId,action:item?'announcement.update':'announcement.create',target:`announcement:${target.id}`,before,after:target,ip,reason:reason.trim()},{persist:false}); return clone(target); });
+  }
+  dashboard({ from, to } = {}) {
+    const now=Date.now(); const fromMs=from?Date.parse(from):now-30*86400000; const toMs=to?Date.parse(to):now; const payments=this.state.payments.filter(p=>p.status==='paid'&&Date.parse(p.createdAt)>=fromMs&&Date.parse(p.createdAt)<=toMs); const sales=payments.reduce((n,p)=>n+(p.amount||0),0); const draws=this.state.draws.filter(d=>Date.parse(d.createdAt)>=fromMs&&Date.parse(d.createdAt)<=toMs); const spend=this.state.pointTransactions.filter(t=>t.type==='draw'&&Date.parse(t.createdAt)>=fromMs&&Date.parse(t.createdAt)<=toMs).reduce((n,t)=>n+Math.abs(t.amount),0); const payout=this.state.pointTransactions.filter(t=>t.type==='redemption'&&Date.parse(t.createdAt)>=fromMs&&Date.parse(t.createdAt)<=toMs).reduce((n,t)=>n+Math.max(0,t.amount),0); const byPack={}; for(const p of this.state.packs){const pt=draws.filter(d=>d.packId===p.id); byPack[p.id]={packId:p.id,name:p.name,salesPoints:pt.length*p.pricePoints,salesCount:pt.length,remaining:this.state.packSlots.filter(s=>s.packId===p.id&&!s.drawnAt).length,rareRemaining:this.adminInventory().find(x=>x.id===p.id)?.rareRemaining||{}};} const high=draws.map(d=>({...d,card:this.state.cards.find(c=>c.id===d.cardId)})).sort((a,b)=>(b.card?.redeemPoints||0)-(a.card?.redeemPoints||0)).slice(0,10); const pendingShipments=this.state.shipments.filter(s=>['requested','processing'].includes(s.status)).length; const redemptionRate=spend?payout/spend:0; return {from:new Date(fromMs).toISOString(),to:new Date(toMs).toISOString(),sales:{total:sales,daily:payments.filter(p=>Date.parse(p.createdAt)>=now-86400000).reduce((n,p)=>n+(p.amount||0),0),monthly:payments.filter(p=>Date.parse(p.createdAt)>=now-30*86400000).reduce((n,p)=>n+(p.amount||0),0)},revenue:sales,drawCount:draws.length,draws:draws.length,redemptionRate,payoutRatio:redemptionRate,packSales:byPack,packs:Object.values(byPack),recentHighValue:high,pendingShipments,pendingShipmentCount:pendingShipments};
+  }
+  getDashboard(options = {}) { return this.dashboard(options); }
+  shipmentLabelCsv(options = {}) { return shipmentLabelCsv(this.listShipments(options), this.state); }
+  async createPack(input = {}) {
+    return this.atomic(state => {
+      const slug = String(input.slug || '').trim(); const name = String(input.name || '').trim();
+      const pricePoints = Number(input.pricePoints); const totalSlots = Number(input.totalSlots ?? 0);
+      if (!slug || !name || !Number.isInteger(pricePoints) || pricePoints < 1 || pricePoints > 1e9) throw new Error('invalid pack');
+      const rows = normalizeSlotRows(input.slots ?? input.slotRows);
+      if (rows.some(row => !Number.isInteger(row.count) || row.count < 1 || row.count > 100000 || row.effectRank && !validRank(row.effectRank))) throw new Error('invalid pack slot count');
+      if (rows.some(row => !state.cards.some(card => card.id === row.cardId))) throw new Error('card not found');
+      if (Array.isArray(input.featuredCardIds) && input.featuredCardIds.some(cardId=>!state.cards.some(c=>c.id===cardId))) throw new Error('card not found');
+      const configuredSlots = rows.reduce((sum, row) => sum + row.count, 0);
+      const resolvedTotal = totalSlots || configuredSlots;
+      if (!Number.isInteger(resolvedTotal) || resolvedTotal < 1 || resolvedTotal > 100000 || configuredSlots > resolvedTotal) throw new Error('invalid total slot count');
+      const idValue = id('pack'); const status = input.status || 'draft';
+      if (!PACK_STATUSES.has(status) || status === 'selling' && configuredSlots !== resolvedTotal) throw new Error('invalid pack status or incomplete configuration');
+      if (status === 'scheduled' && (!input.startsAt || Number.isNaN(Date.parse(input.startsAt)))) throw new Error('scheduled pack requires startsAt');
+      const pack = { id:idValue, slug, name, pricePoints, totalSlots:resolvedTotal, configuredSlots, status,
+        startsAt: input.startsAt || null, description:String(input.description || ''), thumbnailUrl:input.thumbnailUrl || null,
+        featuredCardIds:Array.isArray(input.featuredCardIds) ? [...new Set(input.featuredCardIds)] : [], displayOrder:Number.isInteger(input.displayOrder) ? input.displayOrder : state.packs.length,
+        slotRows:rows, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+      state.packs.push(pack); materializePackSlots(state, pack); return clone(pack);
+    });
+  }
+  async updatePack(packId, input = {}) {
+    return this.atomic(state => {
+      const pack = state.packs.find(p => p.id === packId); if (!pack) throw new Error('pack not found');
+      const locked = Boolean(pack.saleStartedAt) || ['selling', 'sold_out'].includes(pack.status);
+      const hasConfig = input.slots !== undefined || input.slotRows !== undefined || input.totalSlots !== undefined || input.pricePoints !== undefined || input.featuredCardIds !== undefined;
+      if (locked && hasConfig) throw new Error('pack configuration is immutable after sale starts');
+      if (locked && Object.keys(input).some(key => !['name','description','displayOrder','reason'].includes(key))) throw new Error('only text fields can be edited after sale starts');
+      if (input.name !== undefined) { const value=String(input.name).trim(); if (!value) throw new Error('invalid pack name'); pack.name=value; }
+      for (const key of ['slug','description','thumbnailUrl','startsAt']) if (input[key] !== undefined) pack[key] = input[key] == null ? null : String(input[key]);
+      if (input.displayOrder !== undefined) { if (!Number.isInteger(input.displayOrder) || input.displayOrder < 0) throw new Error('invalid display order'); pack.displayOrder=input.displayOrder; }
+      if (input.pricePoints !== undefined) { const value=Number(input.pricePoints); if(!Number.isInteger(value)||value<1) throw new Error('invalid price'); pack.pricePoints=value; }
+      if (input.featuredCardIds !== undefined) { if(!Array.isArray(input.featuredCardIds) || input.featuredCardIds.some(cardId=>!state.cards.some(c=>c.id===cardId))) throw new Error('card not found'); pack.featuredCardIds=[...new Set(input.featuredCardIds)]; }
+      if (!locked && (input.slots !== undefined || input.slotRows !== undefined || input.totalSlots !== undefined)) {
+        const rows=normalizeSlotRows(input.slots ?? input.slotRows ?? pack.slotRows); const total=Number(input.totalSlots ?? pack.totalSlots); const configured=rows.reduce((sum,row)=>sum+row.count,0);
+        if(!rows.length||!Number.isInteger(total)||total<configured||total<1||total>100000||rows.some(row=>!state.cards.some(c=>c.id===row.cardId)||!Number.isInteger(row.count)||row.count<1||row.effectRank&&!validRank(row.effectRank))) throw new Error('invalid pack configuration');
+        pack.slotRows=rows; pack.totalSlots=total; pack.configuredSlots=configured; state.packSlots=state.packSlots.filter(s=>s.packId!==pack.id); materializePackSlots(state,pack);
+      }
+      pack.updatedAt=new Date().toISOString(); return clone(pack);
+    });
+  }
+  async updatePackStatus(packId, status, options = {}) {
+    return this.atomic(state => {
+      if (!PACK_STATUSES.has(status)) throw new Error('invalid pack status'); const pack=state.packs.find(p=>p.id===packId); if(!pack) throw new Error('pack not found');
+      if (status === 'selling' && pack.configuredSlots !== pack.totalSlots) throw new Error('pack configuration is incomplete');
+      if (pack.status === 'sold_out' && status !== 'sold_out') throw new Error('sold out pack cannot be reopened');
+      if (pack.status === 'stopped' && status !== 'stopped') throw new Error('stopped pack cannot be reopened');
+      if (pack.status === 'selling' && ['draft','scheduled'].includes(status)) throw new Error('selling pack cannot be unpublished');
+      if (status === 'scheduled' && (!pack.startsAt || Number.isNaN(Date.parse(pack.startsAt)))) throw new Error('scheduled pack requires startsAt');
+      if (status === 'selling' && pack.startsAt && Date.parse(pack.startsAt) > Date.now()) throw new Error('pack sale has not started');
+      pack.status=status; if (status === 'selling') pack.saleStartedAt ||= new Date().toISOString(); pack.updatedAt=new Date().toISOString(); return clone(pack);
+    });
+  }
+  async duplicatePack(packId, overrides = {}) {
+    const source = this.state.packs.find(p=>p.id===packId); if(!source) throw new Error('pack not found');
+    return this.createPack({ ...source, ...overrides, slug:overrides.slug || `${source.slug}-copy-${Date.now()}`, name:overrides.name || `${source.name} コピー`, status:'draft', slotRows:clone(source.slotRows || []), slots:undefined, id:undefined });
+  }
+  async createCard(card = {}) {
+    return this.atomic(state => {
+      const item=normalizeCard(card); if(!item) throw new Error('invalid card'); item.id=id('card'); item.createdAt=new Date().toISOString(); item.updatedAt=item.createdAt; state.cards.push(item); return clone(item);
+    });
+  }
+  async updateCard(cardId, patch = {}) { return this.atomic(state => { const card=state.cards.find(c=>c.id===cardId); if(!card) throw new Error('card not found'); const next=normalizeCard({...card,...patch}, {partial:true}); if(!next) throw new Error('invalid card'); Object.assign(card,next,{updatedAt:new Date().toISOString()}); return clone(card); }); }
+  async deleteCard(cardId) { return this.atomic(state => { const card=state.cards.find(c=>c.id===cardId); if(!card) throw new Error('card not found'); if(state.packSlots.some(s=>s.cardId===cardId)) throw new Error('card is used by a pack'); if(state.userCards.some(c=>c.cardId===cardId)) throw new Error('card has issued history'); state.cards=state.cards.filter(c=>c.id!==cardId); return clone(card); }); }
+  async importCardsCsv(csv) {
+    const rows=parseCsv(String(csv || '')); if(!rows.length) throw new Error('CSV is empty');
+    return this.atomic(state => { const imported=[]; for(const row of rows){ const item=normalizeCard(row); if(!item) throw new Error('invalid card CSV row'); item.id=id('card'); item.createdAt=new Date().toISOString(); item.updatedAt=item.createdAt; state.cards.push(item); imported.push(item); } return imported.map(clone); });
+  }
+  async setEffectRank(input = {}) { return this.atomic(state => { const name=String(input.name || input.rarity || '').trim(); if(!validRank(name)) throw new Error('valid effect rank required'); const fallbackRank=input.fallbackRank ? String(input.fallbackRank) : null; if(fallbackRank && !validRank(fallbackRank)) throw new Error('invalid fallback rank'); const existing=state.effectRanks.find(x=>x.name===name); if(existing){ if(input.label!==undefined)existing.label=String(input.label); if(input.fallbackRank!==undefined)existing.fallbackRank=fallbackRank; return clone(existing); } const item={id:id('rank'),name,label:String(input.label||name),fallbackRank,createdAt:new Date().toISOString()}; state.effectRanks.push(item); return clone(item); }); }
+  async setEffect(effect = {}) { return this.atomic(state => { const rarity=String(effect.rarity||'').trim(); if(!validRank(rarity)) throw new Error('valid rarity required'); if(effect.url && !isSafeMediaUrl(effect.url)) throw new Error('effect URL must use http(s) or data media'); if(effect.sizeBytes!==undefined && (!Number.isInteger(effect.sizeBytes)||effect.sizeBytes<=0||effect.sizeBytes>20*1024*1024)) throw new Error('effect video exceeds 20MB'); const mimeType=effect.mimeType || ({mp4:'video/mp4',webm:'video/webm'}[effect.format]||null); if(mimeType && !['video/mp4','video/webm'].includes(mimeType)) throw new Error('effect video must be mp4 or webm'); const existing=state.effectVideos.find(x=>x.rarity===rarity); const value={rarity,url:effect.url||null,label:String(effect.label||`${rarity} effect`),mimeType,sizeBytes:effect.sizeBytes ?? null,fallback:effect.fallback===true}; if(existing){Object.assign(existing,value);return clone(existing);} const item={id:id('effect'),...value}; state.effectVideos.push(item); return clone(item); }); }
   verifyDrawLog() { let previousHash = null; for (const entry of this.state.draws) { const { hash, previousHash: recordedPrevious, ...drawData } = entry; if (recordedPrevious !== previousHash || hash !== hashDraw(previousHash, drawData)) return false; previousHash = hash; } return true; }
-  publicPacks() { return this.state.packs.map(p => ({ ...p, remaining: this.state.packSlots.filter(s => s.packId === p.id && !s.drawnAt).length })); }
+  packOdds(packId) { const slots=this.state.packSlots.filter(s=>s.packId===packId); const counts={}; for(const slot of slots) counts[slot.rarity]=(counts[slot.rarity]||0)+1; const total=slots.length; return Object.fromEntries(Object.entries(counts).map(([rarity,count])=>[rarity,{count,total,probability:total?count/total:0}])); }
+  packLineup(packId) { const counts=new Map(); for(const slot of this.state.packSlots.filter(s=>s.packId===packId)){ const key=`${slot.cardId}\u0000${slot.effectRank||''}`; const prior=counts.get(key); if(prior)prior.count++; else counts.set(key,{cardId:slot.cardId,effectRank:slot.effectRank||null,count:1}); } return [...counts.values()].map(item=>({ ...item, card:publicCard(this.state.cards.find(c=>c.id===item.cardId)), probability:item.count/(this.state.packs.find(p=>p.id===packId)?.totalSlots||1) })); }
+  publicPacks() { return this.state.packs.slice().sort((a,b)=>(a.displayOrder??0)-(b.displayOrder??0)).map(p => ({ ...p, status:p.status === 'scheduled' && Date.parse(p.startsAt) <= Date.now() ? 'selling' : p.status, slotRows:undefined, remaining: this.state.packSlots.filter(s => s.packId === p.id && !s.drawnAt).length })); }
   publicCards(userId) { return this.state.userCards.filter(c => c.userId === userId).map(c => ({ ...c, card: publicCard(this.state.cards.find(x => x.id === c.cardId)) })); }
 }
 
 export const publicUser = u => ({ id: u.id, email: u.email, points: u.points, role: u.role, birthDate: u.birthDate });
 export const publicCard = c => c && ({ id: c.id, name: c.name, rarity: c.rarity, imageUrl: c.imageUrl, redeemPoints: c.redeemPoints });
+export const generateTotp = totp;
 
 function seedDemo(state) {
   state.addresses = []; state.shipments = []; state.shipmentItems = []; state.effectVideos = [
