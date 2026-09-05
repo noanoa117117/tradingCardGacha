@@ -5,6 +5,34 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store, drawLogCsv, cardCsv, shipmentLabelCsv, generateTotp } from '../src/store.js';
 
+test('guest storefront exposes packs and routes draw attempts to registration', () => {
+  const html = fs.readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
+  assert.match(html, /else if\(surface==='user'\)enterGuest/);
+  assert.match(html, /async function enterGuest\(\).*await loadPacks\(\)/);
+  assert.match(html, /if\(!currentUser\)\{ selectAuth\('register'\)/);
+  assert.match(html, /class="tab user-only member-only" data-view="cards-view"/);
+  assert.match(html, /id="show-login"/);
+  assert.match(html, /id="show-register"/);
+});
+
+test('admin UI separates feature tabs and gates them by role attributes', () => {
+  const html = fs.readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
+  for (const view of ['overview', 'users', 'cards', 'packs', 'effects', 'shipping']) {
+    assert.match(html, new RegExp(`id="admin-${view}-view"`));
+  }
+  assert.match(html, /data-view="admin-users-view" data-admin-roles="owner"/);
+  assert.match(html, /data-view="admin-cards-view" data-admin-roles="owner operator"/);
+  assert.match(html, /data-view="admin-shipping-view" data-admin-roles="owner operator viewer"/);
+  assert.match(html, /function applyAdminRole\(role\)/);
+  assert.match(html, /const editable=\['owner','operator'\]\.includes\(currentUser\?\.role\)/);
+  assert.match(html, /id="admin-inventory"/);
+  assert.match(html, /id="admin-pack-detail-view"/);
+  assert.match(html, /data-pack-status="selling"/);
+  assert.match(html, /async function showAdminPackDetail\(packId\)/);
+  assert.match(html, /data-admin-pack-detail/);
+  assert.match(html, /詳細・編集/);
+});
+
 function setup() { const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gacha-')); const s=new Store(path.join(dir,'store.json')); const u=s.register({email:'user@example.com',password:'password123',birthDate:'1990-01-01',ageConfirmed:true}); s.addPoints(u.id,100000); return {s,u}; }
 test('draw is non-replacement and keeps point/card/log consistency', async () => {
   const {s,u}=setup(); const pack=s.state.packs[0]; const before=s.state.packSlots.filter(x=>x.packId===pack.id&&!x.drawnAt).length;
@@ -73,6 +101,19 @@ test('card CRUD and CSV import/export preserve required metadata', async () => {
   const {s}=setup(); const card=await s.createCard({name:'Pikachu',modelNumber:'PK-01',rarity:'SR',redeemPoints:123,marketPriceMemo:'=safe',conditionRank:'美品',imageUrl:'https://cdn.example.test/p.png'});
   assert.equal(card.modelNumber,'PK-01'); assert.match(cardCsv([card]),/modelNumber/); const imported=await s.importCardsCsv('name,modelNumber,rarity,imageUrl,redeemPoints,marketPriceMemo,conditionRank\n"CSV Card",CSV-1,R,https://cdn.example.test/c.png,10,"memo,ok",傷あり'); assert.equal(imported[0].name,'CSV Card'); assert.equal(imported[0].marketPriceMemo,'memo,ok');
   const updated=await s.updateCard(card.id,{name:'Pikachu EX'}); assert.equal(updated.name,'Pikachu EX'); const removed=await s.deleteCard(card.id); assert.equal(removed.id,card.id);
+});
+test('card registration merges stable identities and pack reservations move between pool and gacha inventory', async () => {
+  const {s,u}=setup();
+  const card=await s.createCard({name:'Inventory Card',modelNumber:'INV-001',rarity:'SR',redeemPoints:100,inventoryQuantity:5});
+  const merged=await s.createCard({name:'Different label',modelNumber:'inv-001',rarity:'SR',redeemPoints:100,inventoryQuantity:2});
+  assert.equal(merged.id,card.id); assert.equal(merged.merged,true); assert.equal(s.state.cards.filter(x=>x.id===card.id).length,1);
+  const before=s.adminCards().find(x=>x.id===card.id); assert.equal(before.poolQuantity,7); assert.equal(before.gachaAssignedQuantity,0);
+  const pack=await s.createPack({slug:'inventory-pack',name:'Inventory Pack',pricePoints:1,totalSlots:3,slots:[{cardId:card.id,count:3}]});
+  const reserved=s.adminCards().find(x=>x.id===card.id); assert.equal(reserved.poolQuantity,4); assert.equal(reserved.gachaAssignedQuantity,3);
+  await assert.rejects(s.createPack({slug:'too-many',name:'Too Many',pricePoints:1,totalSlots:5,slots:[{cardId:card.id,count:5}]}),/insufficient pool/);
+  await s.updatePackStatus(pack.id,'selling'); await s.addPoints(u.id,100); await s.draw(u.id,pack.id,1);
+  const drawn=s.adminCards().find(x=>x.id===card.id); assert.equal(drawn.inventoryQuantity,6); assert.equal(drawn.gachaAssignedQuantity,2); assert.equal(drawn.issuedQuantity,1);
+  await s.updatePackStatus(pack.id,'deleted'); const released=s.adminCards().find(x=>x.id===card.id); assert.equal(released.poolQuantity,6); assert.equal(released.gachaAssignedQuantity,0); assert.equal(s.state.packSlots.filter(x=>x.packId===pack.id&&!x.drawnAt).length,0); assert.equal(s.state.userCards.length,1);
 });
 test('pack aggregate rows calculate odds, reject incomplete publication, and duplicate safely', async () => {
   const {s}=setup(); const a=s.state.cards.find(card=>card.rarity==='N'); const b=s.state.cards.find(card=>card.rarity==='SSR'); const pack=await s.createPack({slug:'aggregate',name:'Aggregate',pricePoints:10,totalSlots:100000,slots:[{cardId:a.id,count:99999,effectRank:'N'},{cardId:b.id,count:1,effectRank:'SSR'}]});

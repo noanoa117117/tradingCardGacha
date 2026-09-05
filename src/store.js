@@ -11,8 +11,8 @@ export function drawLogCsv(draws) {
   const csvValue = value => { const text = String(value ?? ''); const safe = /^[=+\-@]/.test(text) ? `'${text}` : text; return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"','""')}"` : safe; };
   return [headers, ...draws.map(draw => headers.map(key => csvValue(draw[key])))].map(row => row.join(',')).join('\r\n') + '\r\n';
 }
-const PACK_STATUSES = new Set(['draft', 'scheduled', 'selling', 'sold_out', 'stopped']);
-const CARD_HEADERS = ['id','name','modelNumber','rarity','imageUrl','thumbnailUrl','redeemPoints','marketPriceMemo','conditionRank'];
+const PACK_STATUSES = new Set(['draft', 'scheduled', 'selling', 'sold_out', 'stopped', 'deleted']);
+const CARD_HEADERS = ['id','name','modelNumber','rarity','imageUrl','thumbnailUrl','redeemPoints','marketPriceMemo','conditionRank','inventoryQuantity'];
 export function cardCsv(cards) {
   const csvValue = value => { const text=String(value ?? ''); const safe=/^[=+\-@]/.test(text) ? `'${text}` : text; return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"','""')}"` : safe; };
   return [CARD_HEADERS, ...cards.map(card=>CARD_HEADERS.map(key=>csvValue(card[key])))].map(row=>row.join(',')).join('\r\n')+'\r\n';
@@ -37,11 +37,13 @@ function parseCsv(text) {
 function validRank(value) { return /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(String(value)); }
 function isSafeMediaUrl(value) { return /^https:\/\//i.test(String(value)) || /^data:(?:image|video)\/(?:png|jpeg|jpg|webp|svg\+xml|mp4|webm);base64,[A-Za-z0-9+/=_-]+$/i.test(String(value)); }
 function normalizeCard(card = {}, { partial = false } = {}) {
-  if (partial && card.name === undefined && card.rarity === undefined && card.redeemPoints === undefined && card.modelNumber === undefined) return {};
+  if (partial && card.name === undefined && card.rarity === undefined && card.redeemPoints === undefined && card.modelNumber === undefined && card.inventoryQuantity === undefined && card.quantity === undefined && card.stock === undefined && card.stockQuantity === undefined && card.poolQuantity === undefined && card.count === undefined) return {};
   const name=card.name === undefined && partial ? undefined : String(card.name||'').trim(); const rarity=card.rarity === undefined && partial ? undefined : String(card.rarity||'').trim();
   const redeemPoints=card.redeemPoints === undefined && partial ? undefined : Number(card.redeemPoints);
   if ((!partial && (!name || !validRank(rarity) || !Number.isInteger(redeemPoints)||redeemPoints<0)) || (partial && ((name!==undefined&&!name)||(rarity!==undefined&&!validRank(rarity))||(redeemPoints!==undefined&&(!Number.isInteger(redeemPoints)||redeemPoints<0))))) return null;
   const item={}; if(name!==undefined)item.name=name; if(rarity!==undefined)item.rarity=rarity; if(redeemPoints!==undefined)item.redeemPoints=redeemPoints;
+  const rawInventory = card.inventoryQuantity ?? card.quantity ?? card.stockQuantity ?? card.stock ?? card.poolQuantity ?? card.count;
+  if (rawInventory !== undefined && rawInventory !== null && rawInventory !== '') { const inventoryQuantity=Number(rawInventory); if(!Number.isSafeInteger(inventoryQuantity)||inventoryQuantity<0) return null; item.inventoryQuantity=inventoryQuantity; }
   for(const key of ['modelNumber','imageUrl','thumbnailUrl','marketPriceMemo','conditionRank']) if(card[key]!==undefined) { if(card[key]!==null && String(card[key]).length>10000) return null; item[key]=card[key]===null?null:String(card[key]); }
   if(item.imageUrl && !isSafeMediaUrl(item.imageUrl)) return null; if(item.thumbnailUrl && !isSafeMediaUrl(item.thumbnailUrl)) return null;
   if(item.imageUrl && !item.thumbnailUrl) item.thumbnailUrl=item.imageUrl;
@@ -55,6 +57,9 @@ function normalizeSlotRows(slots) {
 function materializePackSlots(state, pack) {
   let index=0; for(const row of pack.slotRows || []) { const card=state.cards.find(c=>c.id===row.cardId); for(let n=0;n<row.count;n++) state.packSlots.push({id:`${pack.id}_slot_${++index}`,packId:pack.id,cardId:row.cardId,rarity:card.rarity,effectRank:row.effectRank||null,drawnAt:null}); }
 }
+function reservedCardCount(state, cardId, exceptPackId = null) { return state.packSlots.filter(slot=>slot.cardId===cardId&&!slot.drawnAt&&slot.packId!==exceptPackId&&state.packs.some(pack=>pack.id===slot.packId&&pack.status!=='deleted')).length; }
+function cardIdentity(card) { const model=String(card.modelNumber||'').trim().toLowerCase(); return model ? `model:${model}` : `name:${String(card.name||'').trim().toLowerCase()}\u0000${String(card.conditionRank||'').trim().toLowerCase()}\u0000${String(card.rarity||'').trim().toLowerCase()}`; }
+function cardInventoryQuantity(card) { return Number.isSafeInteger(card?.inventoryQuantity) && card.inventoryQuantity >= 0 ? card.inventoryQuantity : 0; }
 
 function passwordHash(password, salt = crypto.randomBytes(16).toString('hex')) {
   return { salt, hash: crypto.scryptSync(password, salt, 32).toString('hex') };
@@ -118,6 +123,16 @@ export class Store {
         const grouped = new Map(); for (const slot of this.state.packSlots.filter(s=>s.packId===pack.id)) { const key=`${slot.cardId}\u0000${slot.effectRank||''}`; const row=grouped.get(key); if(row) row.count++; else grouped.set(key,{cardId:slot.cardId,count:1,effectRank:slot.effectRank||null}); }
         pack.slotRows=[...grouped.values()];
       }
+    }
+    // Older stores had no inventoryQuantity.  Existing pack slots are already
+    // authoritative reservations, so retain them and provide a generous
+    // migration default for legacy cards whose physical stock was not tracked.
+    for (const card of this.state.cards) {
+      const reserved=reservedCardCount(this.state,card.id);
+      const hasInventory = card.inventoryQuantity !== undefined && card.inventoryQuantity !== null && card.inventoryQuantity !== '';
+      const parsedInventory = hasInventory ? Number(card.inventoryQuantity) : NaN;
+      if (Number.isSafeInteger(parsedInventory)) card.inventoryQuantity = Math.max(0, parsedInventory, reserved);
+      else card.inventoryQuantity = Math.max(reserved, 1000000);
     }
     this.migrateAdminModel();
     this.ensureDevelopmentDemoUser();
@@ -288,6 +303,14 @@ export class Store {
       return { id: pack.id, slug: pack.slug, name: pack.name, status: pack.status, totalSlots: pack.totalSlots ?? slots.length, configuredSlots: slots.length, remaining: remaining.length, rareRemaining, rareRemainingByRarity: rareRemaining };
     });
   }
+  adminCards() {
+    return this.state.cards.map(card => {
+      const totalInventory = cardInventoryQuantity(card);
+      const reservedQuantity = reservedCardCount(this.state, card.id);
+      const issuedQuantity = this.state.userCards.filter(item => item.cardId === card.id).length;
+      return { ...clone(card), inventoryQuantity: totalInventory, totalInventory, poolQuantity: Math.max(0, totalInventory - reservedQuantity), reservedQuantity, gachaAssignedQuantity: reservedQuantity, issuedQuantity };
+    });
+  }
   searchDraws({ userId = '', packId = '', from = '', to = '', rarity = '' } = {}) {
     const fromMs = from ? Date.parse(from) : NaN; const toMs = to ? Date.parse(to) : NaN;
     return this.state.draws.filter(draw => {
@@ -321,6 +344,8 @@ export class Store {
         const slot = available.splice(index, 1)[0];
         slot.drawnAt = new Date().toISOString(); slot.drawnBy = userId;
         const card = state.cards.find(c => c.id === slot.cardId);
+        if (!card || !Number.isInteger(card.inventoryQuantity) || card.inventoryQuantity < 1) throw new Error('reserved card inventory is inconsistent');
+        card.inventoryQuantity--;
         const previousHash = state.draws.at(-1)?.hash || null;
         const drawData = { id: id('drw'), userId, packId, slotId: slot.id, cardId: card.id, rarity: card.rarity, remainingBefore, remainingAfter: remainingBefore - 1, createdAt: slot.drawnAt };
         const draw = { ...drawData, previousHash, hash: hashDraw(previousHash, drawData) };
@@ -481,6 +506,11 @@ export class Store {
       const configuredSlots = rows.reduce((sum, row) => sum + row.count, 0);
       const resolvedTotal = totalSlots || configuredSlots;
       if (!Number.isInteger(resolvedTotal) || resolvedTotal < 1 || resolvedTotal > 100000 || configuredSlots > resolvedTotal) throw new Error('invalid total slot count');
+      const needed = new Map(); for (const row of rows) needed.set(row.cardId, (needed.get(row.cardId) || 0) + row.count);
+      for (const [cardId, count] of needed) {
+        const card = state.cards.find(item => item.id === cardId);
+        if (Math.max(0, cardInventoryQuantity(card) - reservedCardCount(state, cardId)) < count) throw new Error('insufficient pool card inventory');
+      }
       const idValue = id('pack'); const status = input.status || 'draft';
       if (!PACK_STATUSES.has(status) || status === 'selling' && configuredSlots !== resolvedTotal) throw new Error('invalid pack status or incomplete configuration');
       if (status === 'scheduled' && (!input.startsAt || Number.isNaN(Date.parse(input.startsAt)))) throw new Error('scheduled pack requires startsAt');
@@ -506,6 +536,8 @@ export class Store {
       if (!locked && (input.slots !== undefined || input.slotRows !== undefined || input.totalSlots !== undefined)) {
         const rows=normalizeSlotRows(input.slots ?? input.slotRows ?? pack.slotRows); const total=Number(input.totalSlots ?? pack.totalSlots); const configured=rows.reduce((sum,row)=>sum+row.count,0);
         if(!rows.length||!Number.isInteger(total)||total<configured||total<1||total>100000||rows.some(row=>!state.cards.some(c=>c.id===row.cardId)||!Number.isInteger(row.count)||row.count<1||row.effectRank&&!validRank(row.effectRank))) throw new Error('invalid pack configuration');
+        const needed = new Map(); for (const row of rows) needed.set(row.cardId, (needed.get(row.cardId) || 0) + row.count);
+        for (const [cardId, count] of needed) if (Math.max(0, cardInventoryQuantity(state.cards.find(c => c.id === cardId)) - reservedCardCount(state, cardId, pack.id)) < count) throw new Error('insufficient pool card inventory');
         pack.slotRows=rows; pack.totalSlots=total; pack.configuredSlots=configured; state.packSlots=state.packSlots.filter(s=>s.packId!==pack.id); materializePackSlots(state,pack);
       }
       pack.updatedAt=new Date().toISOString(); return clone(pack);
@@ -514,6 +546,14 @@ export class Store {
   async updatePackStatus(packId, status, options = {}) {
     return this.atomic(state => {
       if (!PACK_STATUSES.has(status)) throw new Error('invalid pack status'); const pack=state.packs.find(p=>p.id===packId); if(!pack) throw new Error('pack not found');
+      if (status === 'deleted') {
+        if (pack.status === 'deleted') throw new Error('pack already deleted');
+        // Keep drawn slots for audit/history; removing only undrawn slots
+        // releases their reservation back to the pool automatically.
+        state.packSlots = state.packSlots.filter(slot => slot.packId !== pack.id || Boolean(slot.drawnAt));
+        pack.status = 'deleted'; pack.deletedAt = new Date().toISOString(); pack.updatedAt = pack.deletedAt;
+        return clone(pack);
+      }
       if (status === 'selling' && pack.configuredSlots !== pack.totalSlots) throw new Error('pack configuration is incomplete');
       if (pack.status === 'sold_out' && status !== 'sold_out') throw new Error('sold out pack cannot be reopened');
       if (pack.status === 'stopped' && status !== 'stopped') throw new Error('stopped pack cannot be reopened');
@@ -529,14 +569,22 @@ export class Store {
   }
   async createCard(card = {}) {
     return this.atomic(state => {
-      const item=normalizeCard(card); if(!item) throw new Error('invalid card'); item.id=id('card'); item.createdAt=new Date().toISOString(); item.updatedAt=item.createdAt; state.cards.push(item); return clone(item);
+      const item=normalizeCard(card); if(!item) throw new Error('invalid card');
+      const quantity = item.inventoryQuantity ?? 0; delete item.inventoryQuantity;
+      const existing = state.cards.find(candidate => cardIdentity(candidate) === cardIdentity(item));
+      if (existing) {
+        existing.inventoryQuantity = cardInventoryQuantity(existing) + quantity;
+        existing.updatedAt = new Date().toISOString();
+        return { ...clone(existing), merged: true, addedInventoryQuantity: quantity };
+      }
+      item.inventoryQuantity = quantity; item.id=id('card'); item.createdAt=new Date().toISOString(); item.updatedAt=item.createdAt; state.cards.push(item); return clone(item);
     });
   }
-  async updateCard(cardId, patch = {}) { return this.atomic(state => { const card=state.cards.find(c=>c.id===cardId); if(!card) throw new Error('card not found'); const next=normalizeCard({...card,...patch}, {partial:true}); if(!next) throw new Error('invalid card'); Object.assign(card,next,{updatedAt:new Date().toISOString()}); return clone(card); }); }
+  async updateCard(cardId, patch = {}) { return this.atomic(state => { const card=state.cards.find(c=>c.id===cardId); if(!card) throw new Error('card not found'); const next=normalizeCard({...card,...patch}, {partial:true}); if(!next) throw new Error('invalid card'); if(next.inventoryQuantity !== undefined && next.inventoryQuantity < reservedCardCount(state, cardId)) throw new Error('inventory cannot be below gacha-assigned quantity'); const identity=cardIdentity({...card,...next}); const duplicate=state.cards.find(candidate=>candidate.id!==cardId&&cardIdentity(candidate)===identity); if(duplicate) throw new Error('card identity already exists'); Object.assign(card,next,{updatedAt:new Date().toISOString()}); return clone(card); }); }
   async deleteCard(cardId) { return this.atomic(state => { const card=state.cards.find(c=>c.id===cardId); if(!card) throw new Error('card not found'); if(state.packSlots.some(s=>s.cardId===cardId)) throw new Error('card is used by a pack'); if(state.userCards.some(c=>c.cardId===cardId)) throw new Error('card has issued history'); state.cards=state.cards.filter(c=>c.id!==cardId); return clone(card); }); }
   async importCardsCsv(csv) {
     const rows=parseCsv(String(csv || '')); if(!rows.length) throw new Error('CSV is empty');
-    return this.atomic(state => { const imported=[]; for(const row of rows){ const item=normalizeCard(row); if(!item) throw new Error('invalid card CSV row'); item.id=id('card'); item.createdAt=new Date().toISOString(); item.updatedAt=item.createdAt; state.cards.push(item); imported.push(item); } return imported.map(clone); });
+    return this.atomic(state => { const imported=[]; for(const row of rows){ const item=normalizeCard(row); if(!item) throw new Error('invalid card CSV row'); const quantity=item.inventoryQuantity ?? 0; delete item.inventoryQuantity; const existing=state.cards.find(candidate=>cardIdentity(candidate)===cardIdentity(item)); if(existing){ existing.inventoryQuantity=cardInventoryQuantity(existing)+quantity; existing.updatedAt=new Date().toISOString(); imported.push({...clone(existing),merged:true,addedInventoryQuantity:quantity}); } else { item.inventoryQuantity=quantity; item.id=id('card'); item.createdAt=new Date().toISOString(); item.updatedAt=item.createdAt; state.cards.push(item); imported.push(item); } } return imported.map(clone); });
   }
   async setEffectRank(input = {}) { return this.atomic(state => { const name=String(input.name || input.rarity || '').trim(); if(!validRank(name)) throw new Error('valid effect rank required'); const fallbackRank=input.fallbackRank ? String(input.fallbackRank) : null; if(fallbackRank && !validRank(fallbackRank)) throw new Error('invalid fallback rank'); const existing=state.effectRanks.find(x=>x.name===name); if(existing){ if(input.label!==undefined)existing.label=String(input.label); if(input.fallbackRank!==undefined)existing.fallbackRank=fallbackRank; return clone(existing); } const item={id:id('rank'),name,label:String(input.label||name),fallbackRank,createdAt:new Date().toISOString()}; state.effectRanks.push(item); return clone(item); }); }
   async setEffect(effect = {}) { return this.atomic(state => { const rarity=String(effect.rarity||'').trim(); if(!validRank(rarity)) throw new Error('valid rarity required'); if(effect.url && !isSafeMediaUrl(effect.url)) throw new Error('effect URL must use http(s) or data media'); if(effect.sizeBytes!==undefined && (!Number.isInteger(effect.sizeBytes)||effect.sizeBytes<=0||effect.sizeBytes>20*1024*1024)) throw new Error('effect video exceeds 20MB'); const mimeType=effect.mimeType || ({mp4:'video/mp4',webm:'video/webm'}[effect.format]||null); if(mimeType && !['video/mp4','video/webm'].includes(mimeType)) throw new Error('effect video must be mp4 or webm'); const existing=state.effectVideos.find(x=>x.rarity===rarity); const value={rarity,url:effect.url||null,label:String(effect.label||`${rarity} effect`),mimeType,sizeBytes:effect.sizeBytes ?? null,fallback:effect.fallback===true}; if(existing){Object.assign(existing,value);return clone(existing);} const item={id:id('effect'),...value}; state.effectVideos.push(item); return clone(item); }); }
