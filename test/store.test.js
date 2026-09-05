@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Store, POINT_PLANS, drawLogCsv, cardCsv, shipmentLabelCsv, generateTotp, ageAtLeast18 } from '../src/store.js';
+import { Store, POINT_PLANS, drawLogCsv, cardCsv, paymentCsv, shipmentLabelCsv, generateTotp, ageAtLeast18 } from '../src/store.js';
 
 test('guest storefront exposes packs and routes draw attempts to registration', () => {
   const html = fs.readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
@@ -31,6 +31,13 @@ test('admin UI separates feature tabs and gates them by role attributes', () => 
   assert.match(html, /async function showAdminPackDetail\(packId\)/);
   assert.match(html, /data-admin-pack-detail/);
   assert.match(html, /詳細・編集/);
+});
+test('admin billing CSV uses authenticated blob download and redacted columns', () => {
+  const html = fs.readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
+  assert.match(html, /async function downloadAdminBillingCsv\(\)/);
+  assert.match(html, /authorization:`Bearer \$\{token\}`/);
+  assert.match(html, /response\.blob\(\)/);
+  assert.match(html, /item\.providerPaymentId/);
 });
 
 function setup() { const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gacha-')); const s=new Store(path.join(dir,'store.json')); const u=s.register({email:'user@example.com',password:'password123',birthDate:'1990-01-01',ageConfirmed:true}); s.addPoints(u.id,100000); return {s,u}; }
@@ -166,4 +173,29 @@ test('P3 bank reconciliation, settings, dashboard and shipment label CSV', async
   const settings=await s.updateSiteSettings({announcement:'お知らせ',banner:'top',presets:[{points:100}],bonusRate:10,maintenance:false,termsMarkdown:'# terms',legalMarkdown:'# legal'},{adminId:s.state.adminUsers[0].id,reason:'運用更新'}); assert.equal(settings.banner,'top'); assert.equal(settings.termsMarkdown,'# terms');
   const pending=await s.createPayment({userId:u.id,points:100,amount:100,stripePaymentId:'pi_dash'}); const paid=await s.markPaymentPaid(pending.id,{stripePaymentId:'pi_dash'}); assert.equal(paid.status,'paid'); const dash=s.dashboard(); assert.equal(dash.drawCount,0); assert.equal(dash.sales.total,100);
   const draw=await s.draw(u.id,s.state.packs[0].id,1); const address=await s.addAddress(u.id,{name:'=Name',postalCode:'100-0001',prefecture:'Tokyo',city:'Chiyoda',line1:'1-1'}); const shipment=await s.createShipment(u.id,[draw.results[0].userCard.id],address.id); const csv=shipmentLabelCsv(s.listShipments(),s.state); assert.match(csv,/shipmentId,status/); assert.match(csv,/'=Name/);
+});
+test('admin billing keeps gross/refund periods independent, masks roles, paginates and exports safely', async () => {
+  const {s,u}=setup();
+  const payment=await s.createPayment({userId:u.id,points:1000,amount:1000});
+  const storedPayment=s.state.payments.find(item=>item.id===payment.id); storedPayment.status='refunded'; storedPayment.paidAt='2026-01-10T00:00:00+09:00'; storedPayment.refundedAt='2026-01-20T00:00:00+09:00';
+  const pending=await s.createPayment({userId:u.id,points:500,amount:500}); s.state.payments.find(item=>item.id===pending.id).createdAt='2026-01-15T00:00:00+09:00';
+  const operator=s.createAdminUser({email:'operator@example.com',password:'operatorpass123',role:'operator'});
+  const january=s.adminBilling({role:'operator',from:'2026-01-01',to:'2026-02-01',page:1,pageSize:1});
+  assert.equal(january.summary.gross,1000); assert.equal(january.summary.refunds,1000); assert.equal(january.summary.net,0); assert.equal(january.total,2); assert.equal(january.pageSize,1); assert.equal(january.totalPages,2); assert.equal(january.users[0].email,'u***@example.com'); assert.equal(january.payments[0].paidAtEstimated,false);
+  const owner=s.adminBilling({role:'owner',from:'2026-01-01',to:'2026-02-01'}); assert.equal(owner.users[0].email,u.email);
+  const detail=s.adminPaymentDetail(payment.id,{role:'operator'}); assert.equal(detail.payment.id,payment.id); assert.match(detail.user.email,/\*\*\*@/); assert.throws(()=>s.adminPaymentDetail(payment.id,{role:'viewer'}),/insufficient/);
+  const legacy={id:'pay_legacy',userId:u.id,points:10,amount:10,currency:'JPY',status:'paid',createdAt:'2026-01-25T00:00:00+09:00',metadata:{}}; s.state.payments.push(legacy); const legacyView=s.adminBilling({role:'viewer',from:'2026-01-01',to:'2026-02-01'}).payments.find(x=>x.id===legacy.id); assert.equal(legacyView.paidAtEstimated,true);
+  const csv=paymentCsv([{id:'\t=FORMULA',userId:'u',email:'x@example.com',status:'paid',amount:1,currency:'JPY',points:1}]); assert.match(csv,/^\ufeffid,userId/); assert.match(csv,/\'\t=FORMULA/); assert.match(csv,/'\t=FORMULA/);
+  assert.equal(operator.user.role,'operator');
+});
+test('admin billing review boundaries reject invalid dates, isolate currencies, and redact detail DTOs', async () => {
+  const {s,u}=setup();
+  await assert.rejects(s.createPayment({userId:u.id,points:1,amount:1,currency:'USD'}),/only JPY/);
+  assert.throws(()=>s.adminBilling({role:'owner',from:'2026-02-30'}),/invalid billing date range/);
+  const zero=await s.createPayment({userId:u.id,points:1,amount:0}); s.state.payments.find(p=>p.id===zero.id).status='paid'; s.state.payments.find(p=>p.id===zero.id).paidAt='2026-01-05T00:00:00+09:00';
+  const billing=s.adminBilling({role:'owner',from:'2026-01-01',to:'2026-02-01'}); assert.equal(billing.summary.successCount,1);
+  assert.throws(()=>s.adminBilling({role:'viewer',email:u.email}),/email search unavailable/);
+  for(let i=0;i<101;i++) { const p=await s.createPayment({userId:u.id,points:1,amount:1}); p.status='paid'; p.paidAt=`2025-01-01T00:00:${String(i%60).padStart(2,'0')}Z`; }
+  const detail=s.adminPaymentDetail(s.state.payments.at(-1).id,{role:'operator'}); assert.ok(detail.payment); assert.ok(detail.pointTransactions.every(x=>!('metadata' in x)&&!('ip' in x))); assert.deepEqual(detail.auditLogs,[]);
+  const ownerDetail=s.adminPaymentDetail(s.state.payments[0].id,{role:'owner'}); assert.ok(ownerDetail.auditLogs.every(x=>!('ip' in x)&&!('before' in x)&&!('after' in x)));
 });

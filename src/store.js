@@ -37,6 +37,15 @@ export function shipmentLabelCsv(shipments, state = null) {
   });
   return [headers,...rows].map(row=>row.join(',')).join('\r\n')+'\r\n';
 }
+export function paymentCsv(payments = []) {
+  const headers = ['id', 'userId', 'email', 'status', 'amount', 'currency', 'points', 'paymentMethod', 'provider', 'providerPaymentId', 'createdAt', 'paidAt', 'paidAtEstimated', 'refundedAt', 'refundAmount'];
+  const csvValue = value => {
+    const text = String(value ?? '');
+    const safe = /^[\s\t\r\n]*[=+\-@]/.test(text) ? `'${text}` : text;
+    return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"', '""')}"` : safe;
+  };
+  return `\ufeff${[headers, ...payments.map(payment => headers.map(key => csvValue(payment[key])))].map(row => row.join(',')).join('\r\n')}\r\n`;
+}
 function parseCsv(text) {
   const rows=[]; let row=[], field='', quoted=false;
   for(let i=0;i<text.length;i++){ const ch=text[i]; if(quoted){ if(ch==='"'&&text[i+1]==='"'){field+='"';i++;} else if(ch==='"')quoted=false; else field+=ch; } else if(ch==='"'&&field===''){quoted=true;} else if(ch===','){row.push(field);field='';} else if(ch==='\n'){row.push(field.replace(/\r$/,''));field='';if(row.some(x=>x!==''))rows.push(row);row=[];} else field+=ch; }
@@ -103,6 +112,28 @@ function tokyoDate(value = Date.now()) {
   const parts = new Intl.DateTimeFormat('en', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value));
   const fields = Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
   return `${fields.year}-${fields.month}-${fields.day}`;
+}
+function tokyoDateBoundary(value, end = false) {
+  const date = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return NaN;
+  const timestamp = Date.parse(`${date}T00:00:00+09:00`);
+  if (Number.isNaN(timestamp)) return NaN;
+  // Date.parse normalizes impossible dates (for example 2026-02-30).  Keep
+  // the API's date filters strict by checking the JST calendar round-trip.
+  if (tokyoDate(timestamp) !== date) return NaN;
+  return end ? timestamp + 86400000 : timestamp;
+}
+function maskEmail(email) {
+  const value = String(email || '');
+  const at = value.indexOf('@');
+  if (at <= 0) return '***';
+  const local = value.slice(0, at);
+  return `${local.length > 1 ? `${local[0]}***` : '***'}${value.slice(at)}`;
+}
+function maskProviderId(value) {
+  const text = String(value || '');
+  if (!text) return null;
+  return text.length <= 8 ? '••••' : `${text.slice(0, 4)}••••${text.slice(-4)}`;
 }
 function birthDateIssue(date, now = Date.now()) {
   const value = String(date ?? '');
@@ -426,9 +457,102 @@ export class Store {
   }
   setPaymentProvider(provider) { this.paymentProvider = provider || null; return this.paymentProvider; }
   listPayments(userId = '') { return clone(this.state.payments.filter(p => !userId || p.userId === userId).sort((a,b)=>Date.parse(b.createdAt)-Date.parse(a.createdAt))); }
+  adminBilling({ role = 'viewer', from = '', to = '', status = '', method = '', provider = '', userId = '', email = '', page = 1, pageSize = 50 } = {}) {
+    if (!['owner', 'operator', 'viewer'].includes(role)) throw new Error('invalid admin role');
+    const fromMs = from ? tokyoDateBoundary(from) : NaN;
+    const toMs = to ? tokyoDateBoundary(to, true) : NaN;
+    if ((from && Number.isNaN(fromMs)) || (to && Number.isNaN(toMs))) throw new Error('invalid billing date range');
+    if (!Number.isNaN(fromMs) && !Number.isNaN(toMs) && fromMs >= toMs) throw new Error('invalid billing date range');
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    const normalizedMethod = String(method || '').trim().toLowerCase();
+    const normalizedProvider = String(provider || '').trim().toLowerCase();
+    const normalizedUserId = String(userId || '').trim().toLowerCase();
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (role === 'viewer' && normalizedEmail) throw new Error('email search unavailable for viewer');
+    const userById = new Map(this.state.users.map(user => [user.id, user]));
+    const effectivePaidAt = payment => {
+      if (payment.paidAt) return { value: payment.paidAt, estimated: false };
+      if (['paid', 'refunded'].includes(payment.status) && payment.createdAt) return { value: payment.createdAt, estimated: true };
+      return { value: null, estimated: false };
+    };
+    const effectiveRefundedAt = payment => payment.refundedAt || null;
+    const matchesDate = payment => {
+      if (Number.isNaN(fromMs) && Number.isNaN(toMs)) return true;
+      const values = [effectivePaidAt(payment).value, effectiveRefundedAt(payment), payment.createdAt].filter(Boolean).map(value => Date.parse(value)).filter(value => !Number.isNaN(value));
+      return values.some(eventMs => (Number.isNaN(fromMs) || eventMs >= fromMs) && (Number.isNaN(toMs) || eventMs < toMs));
+    };
+    const all = this.state.payments.filter(payment => {
+      const user = userById.get(payment.userId);
+      // Billing is a JPY-only ledger.  Ignore any legacy/invalid non-JPY row
+      // rather than mixing currencies in the totals.
+      if (!user || user.role !== 'user' || String(payment.currency || '').toUpperCase() !== 'JPY' || !matchesDate(payment)) return false;
+      if (normalizedStatus && String(payment.status || '').toLowerCase() !== normalizedStatus) return false;
+      const paymentMethod = String(payment.paymentMethod || payment.metadata?.paymentMethod || 'unknown').toLowerCase();
+      const paymentProvider = String(payment.provider || payment.metadata?.provider || (payment.stripePaymentId ? 'stripe' : 'unconfigured')).toLowerCase();
+      if (normalizedMethod && paymentMethod !== normalizedMethod) return false;
+      if (normalizedProvider && paymentProvider !== normalizedProvider) return false;
+      if (normalizedUserId && !String(payment.userId).toLowerCase().includes(normalizedUserId)) return false;
+      // Operators can search only an exact address; viewers cannot search by
+      // email at all because their result is intentionally masked.
+      if (normalizedEmail && String(user.email || '').toLowerCase() !== normalizedEmail) return false;
+      return true;
+    });
+    const grossEligible = payment => ['paid', 'refunded'].includes(payment.status) && effectivePaidAt(payment).value;
+    const refundEligible = payment => payment.status === 'refunded' && effectiveRefundedAt(payment);
+    const inRange = value => {
+      const at = Date.parse(value || '');
+      return !Number.isNaN(at) && (Number.isNaN(fromMs) || at >= fromMs) && (Number.isNaN(toMs) || at < toMs);
+    };
+    const grossAmount = payment => grossEligible(payment) && inRange(effectivePaidAt(payment).value) ? Number(payment.amount) || 0 : 0;
+    const refundAmount = payment => refundEligible(payment) && inRange(effectiveRefundedAt(payment)) ? Number(payment.amount) || 0 : 0;
+    const summary = { gross: all.reduce((total, payment) => total + grossAmount(payment), 0), refunds: all.reduce((total, payment) => total + refundAmount(payment), 0), paymentCount: all.length, successCount: all.filter(payment => grossEligible(payment) && inRange(effectivePaidAt(payment).value)).length, refundCount: all.filter(payment => refundEligible(payment) && inRange(effectiveRefundedAt(payment))).length, refundPendingCount: all.filter(payment => payment.status === 'refund_pending').length };
+    summary.net = summary.gross - summary.refunds;
+    const byUser = new Map();
+    for (const payment of all) {
+      const user = userById.get(payment.userId);
+      const current = byUser.get(payment.userId) || { userId: payment.userId, email: user.email, gross: 0, refunds: 0, net: 0, paymentCount: 0, refundedCount: 0, lastPaidAt: null };
+      current.gross += grossAmount(payment); current.refunds += refundAmount(payment); current.net = current.gross - current.refunds; current.paymentCount += 1; if (refundEligible(payment)) current.refundedCount += 1;
+      const paidAt = effectivePaidAt(payment).value; if (paidAt && (!current.lastPaidAt || Date.parse(paidAt) > Date.parse(current.lastPaidAt))) current.lastPaidAt = paidAt;
+      byUser.set(payment.userId, current);
+    }
+    const users = [...byUser.values()].sort((a, b) => b.gross - a.gross || b.refunds - a.refunds || a.userId.localeCompare(b.userId)).map(item => ({ ...item, email: role === 'owner' ? item.email : maskEmail(item.email) }));
+    const sorted = all.slice().sort((a, b) => {
+      const aAt = Date.parse(effectivePaidAt(a).value || effectiveRefundedAt(a) || a.createdAt || '') || 0;
+      const bAt = Date.parse(effectivePaidAt(b).value || effectiveRefundedAt(b) || b.createdAt || '') || 0;
+      return bAt - aAt || String(b.id).localeCompare(String(a.id));
+    });
+    const safePageSize = Math.min(100, Math.max(1, Number.isInteger(Number(pageSize)) ? Number(pageSize) : 50));
+    const safePage = Math.max(1, Number.isInteger(Number(page)) ? Number(page) : 1);
+    const payments = sorted.slice((safePage - 1) * safePageSize, safePage * safePageSize).map(payment => {
+      const user = userById.get(payment.userId); const paid = effectivePaidAt(payment); const paymentMethod = payment.paymentMethod || payment.metadata?.paymentMethod || null; const paymentProvider = payment.provider || payment.metadata?.provider || (payment.stripePaymentId ? 'stripe' : null);
+      const providerPaymentId = payment.stripePaymentId || payment.providerPaymentId || null;
+      return { id: payment.id, userId: payment.userId, email: role === 'owner' ? user.email : maskEmail(user.email), points: payment.points, amount: payment.amount, currency: payment.currency, status: payment.status, paymentMethod, provider: paymentProvider, providerPaymentId: role === 'owner' ? providerPaymentId : maskProviderId(providerPaymentId), createdAt: payment.createdAt, updatedAt: payment.updatedAt, paidAt: paid.value, paidAtEstimated: paid.estimated, refundedAt: payment.refundedAt || null, refundAmount: refundAmount(payment), metadata: payment.metadata?.planId ? { planId: String(payment.metadata.planId) } : {} };
+    });
+    return { summary, users, payments, total: sorted.length, page: safePage, pageSize: safePageSize, totalPages: Math.max(1, Math.ceil(sorted.length / safePageSize)), filters: { from: from || '', to: to || '', status: normalizedStatus, method: normalizedMethod, provider: normalizedProvider, userId: userId || '', email: email || '' } };
+  }
+  adminPaymentDetail(paymentId, { role = 'viewer' } = {}) {
+    if (!['owner', 'operator'].includes(role)) throw new Error('insufficient admin role');
+    const payment = this.state.payments.find(item => item.id === paymentId);
+    if (!payment) throw new Error('payment not found');
+    const user = this.state.users.find(item => item.id === payment.userId);
+    if (!user || user.role !== 'user') throw new Error('payment user not found');
+    // Build the DTO directly so a detail request remains correct for accounts
+    // with more than 100 payments and never exposes the backing record.
+    const paidAt = payment.paidAt || (['paid', 'refunded'].includes(payment.status) ? payment.createdAt : null);
+    const paymentMethod = payment.paymentMethod || payment.metadata?.paymentMethod || null;
+    const paymentProvider = payment.provider || payment.metadata?.provider || (payment.stripePaymentId ? 'stripe' : null);
+    const providerPaymentId = payment.stripePaymentId || payment.providerPaymentId || null;
+    const publicPayment = { id:payment.id, userId:payment.userId, email:role === 'owner' ? user.email : maskEmail(user.email), points:payment.points, amount:payment.amount, currency:String(payment.currency || '').toUpperCase(), status:payment.status, paymentMethod, provider:paymentProvider, providerPaymentId:role === 'owner' ? providerPaymentId : maskProviderId(providerPaymentId), createdAt:payment.createdAt, updatedAt:payment.updatedAt, paidAt, paidAtEstimated:Boolean(!payment.paidAt && paidAt), refundedAt:payment.refundedAt || null, refundAmount:payment.status === 'refunded' ? Number(payment.refundAmount ?? payment.amount) || 0 : 0, metadata:payment.metadata?.planId ? {planId:String(payment.metadata.planId)} : {}};
+    const pointTransactions = this.state.pointTransactions.filter(item => item.metadata?.paymentId === payment.id).map(item => ({ id:item.id, userId:item.userId, amount:item.amount, balanceBefore:item.balanceBefore, balanceAfter:item.balanceAfter, type:item.type, createdAt:item.createdAt }));
+    // Audit before/after objects can contain provider payloads and IPs.  Only
+    // owners may inspect this already-redacted allowlist.
+    const auditLogs = role === 'owner' ? this.state.adminAuditLogs.filter(item => item.target === `payment:${payment.id}`).map(item => ({ id:item.id, actor:item.actor, action:item.action, target:item.target, reason:item.reason, createdAt:item.createdAt })) : [];
+    return { payment:publicPayment, user:{id:user.id, email:role === 'owner' ? user.email : maskEmail(user.email)}, pointTransactions, auditLogs };
+  }
   async createPayment({ userId, points, amount = 0, currency = 'JPY', stripePaymentId = null, metadata = {} } = {}) {
     points = Number(points); amount = Number(amount);
     if (!userId || !Number.isInteger(points) || points < 1 || !Number.isInteger(amount) || amount < 0) throw new Error('invalid payment');
+    if (String(currency || '').toUpperCase() !== 'JPY') throw new Error('only JPY payments are supported');
     const user = this.state.users.find(item => item.id === userId && item.role === 'user');
     if (!user) throw new Error('user not found');
     if (user.status === 'frozen' || user.status === 'deleted') throw new Error('user is frozen or deleted');
@@ -439,7 +563,8 @@ export class Store {
     // injected provider/webhook explicitly confirms success.
     const status = ['paid','succeeded','completed'].includes(providerResult?.status) ? 'paid' : 'pending';
     const payment = await this.atomic(state => {
-      const item = { id:id('pay'), userId, points, amount, currency:String(currency || 'JPY').toUpperCase(), stripePaymentId:providerResult?.id || stripePaymentId || null, status, refundStatus:null, refundAttempts:0, metadata:clone(metadata || {}), createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+      const createdAt = new Date().toISOString();
+      const item = { id:id('pay'), userId, points, amount, currency:String(currency || 'JPY').toUpperCase(), stripePaymentId:providerResult?.id || stripePaymentId || null, status, refundStatus:null, refundAttempts:0, metadata:clone(metadata || {}), createdAt, updatedAt:createdAt, ...(status === 'paid' ? { paidAt: createdAt } : {}) };
       state.payments.push(item);
       if (status === 'paid') {
         const user=state.users.find(u=>u.id===userId); if(!user) throw new Error('user not found'); user.points += points;
@@ -513,7 +638,16 @@ export class Store {
     return this.atomic(state => { const item=input.id&&state.announcements.find(a=>a.id===input.id); const before=item?clone(item):null; const target=item||{id:id('ann'),createdAt:new Date().toISOString()}; target.title=String(input.title||'').trim(); target.body=String(input.body||''); target.banner=String(input.banner||''); target.published=input.published!==false; target.updatedAt=new Date().toISOString(); if(!target.title) throw new Error('announcement title required'); if(!item) state.announcements.push(target); this.appendAudit({actor:adminId,action:item?'announcement.update':'announcement.create',target:`announcement:${target.id}`,before,after:target,ip,reason:reason.trim()},{persist:false}); return clone(target); });
   }
   dashboard({ from, to } = {}) {
-    const now=Date.now(); const fromMs=from?Date.parse(from):now-30*86400000; const toMs=to?Date.parse(to):now; const payments=this.state.payments.filter(p=>p.status==='paid'&&Date.parse(p.createdAt)>=fromMs&&Date.parse(p.createdAt)<=toMs); const sales=payments.reduce((n,p)=>n+(p.amount||0),0); const draws=this.state.draws.filter(d=>Date.parse(d.createdAt)>=fromMs&&Date.parse(d.createdAt)<=toMs); const spend=this.state.pointTransactions.filter(t=>t.type==='draw'&&Date.parse(t.createdAt)>=fromMs&&Date.parse(t.createdAt)<=toMs).reduce((n,t)=>n+Math.abs(t.amount),0); const payout=this.state.pointTransactions.filter(t=>t.type==='redemption'&&Date.parse(t.createdAt)>=fromMs&&Date.parse(t.createdAt)<=toMs).reduce((n,t)=>n+Math.max(0,t.amount),0); const byPack={}; for(const p of this.state.packs){const pt=draws.filter(d=>d.packId===p.id); byPack[p.id]={packId:p.id,name:p.name,salesPoints:pt.length*p.pricePoints,salesCount:pt.length,remaining:this.state.packSlots.filter(s=>s.packId===p.id&&!s.drawnAt).length,rareRemaining:this.adminInventory().find(x=>x.id===p.id)?.rareRemaining||{}};} const high=draws.map(d=>({...d,card:this.state.cards.find(c=>c.id===d.cardId)})).sort((a,b)=>(b.card?.redeemPoints||0)-(a.card?.redeemPoints||0)).slice(0,10); const pendingShipments=this.state.shipments.filter(s=>['requested','processing'].includes(s.status)).length; const redemptionRate=spend?payout/spend:0; return {from:new Date(fromMs).toISOString(),to:new Date(toMs).toISOString(),sales:{total:sales,daily:payments.filter(p=>Date.parse(p.createdAt)>=now-86400000).reduce((n,p)=>n+(p.amount||0),0),monthly:payments.filter(p=>Date.parse(p.createdAt)>=now-30*86400000).reduce((n,p)=>n+(p.amount||0),0)},revenue:sales,drawCount:draws.length,draws:draws.length,redemptionRate,payoutRatio:redemptionRate,packSales:byPack,packs:Object.values(byPack),recentHighValue:high,pendingShipments,pendingShipmentCount:pendingShipments};
+    const now=Date.now(); const fromMs=from ? tokyoDateBoundary(from) : now-30*86400000; const toMs=to ? tokyoDateBoundary(to,true) : now;
+    if (Number.isNaN(fromMs) || Number.isNaN(toMs) || fromMs >= toMs) throw new Error('invalid dashboard date range');
+    const inRange=value=>{const at=Date.parse(value||''); return !Number.isNaN(at)&&at>=fromMs&&at<toMs;};
+    const paymentAt=p=>p.paidAt||(['paid','refunded'].includes(p.status)?p.createdAt:null);
+    const payments=this.state.payments.filter(p=>String(p.currency||'').toUpperCase()==='JPY'&&['paid','refunded'].includes(p.status)&&inRange(paymentAt(p)));
+    const sales=payments.reduce((n,p)=>n+(p.amount||0),0); const draws=this.state.draws.filter(d=>inRange(d.createdAt));
+    const spend=this.state.pointTransactions.filter(t=>t.type==='draw'&&inRange(t.createdAt)).reduce((n,t)=>n+Math.abs(t.amount),0); const payout=this.state.pointTransactions.filter(t=>t.type==='redemption'&&inRange(t.createdAt)).reduce((n,t)=>n+Math.max(0,t.amount),0);
+    const byPack={}; for(const p of this.state.packs){const pt=draws.filter(d=>d.packId===p.id); byPack[p.id]={packId:p.id,name:p.name,salesPoints:pt.length*p.pricePoints,salesCount:pt.length,remaining:this.state.packSlots.filter(s=>s.packId===p.id&&!s.drawnAt).length,rareRemaining:this.adminInventory().find(x=>x.id===p.id)?.rareRemaining||{}};}
+    const high=draws.map(d=>({...d,card:this.state.cards.find(c=>c.id===d.cardId)})).sort((a,b)=>(b.card?.redeemPoints||0)-(a.card?.redeemPoints||0)).slice(0,10); const pendingShipments=this.state.shipments.filter(s=>['requested','processing'].includes(s.status)).length; const redemptionRate=spend?payout/spend:0;
+    return {from:new Date(fromMs).toISOString(),to:new Date(toMs).toISOString(),sales:{total:sales,daily:payments.filter(p=>inRange(paymentAt(p))&&Date.parse(paymentAt(p))>=now-86400000).reduce((n,p)=>n+(p.amount||0),0),monthly:payments.filter(p=>inRange(paymentAt(p))&&Date.parse(paymentAt(p))>=now-30*86400000).reduce((n,p)=>n+(p.amount||0),0)},revenue:sales,drawCount:draws.length,draws:draws.length,redemptionRate,payoutRatio:redemptionRate,packSales:byPack,packs:Object.values(byPack),recentHighValue:high,pendingShipments,pendingShipmentCount:pendingShipments};
   }
   getDashboard(options = {}) { return this.dashboard(options); }
   shipmentLabelCsv(options = {}) { return shipmentLabelCsv(this.listShipments(options), this.state); }

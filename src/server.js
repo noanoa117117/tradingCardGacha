@@ -1,6 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
-import { Store, POINT_PLANS, pointPlanById, drawLogCsv, cardCsv, shipmentLabelCsv, publicCard, publicUser } from './store.js';
+import { Store, POINT_PLANS, pointPlanById, drawLogCsv, cardCsv, paymentCsv, shipmentLabelCsv, publicCard, publicUser } from './store.js';
 
 const store = new Store();
 const port = Number(process.env.PORT || 3000);
@@ -93,7 +93,25 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/api/admin/shipments') { const u=requireAdmin(req,res,{roles:['owner','operator','viewer']}); if(!u)return; return json(res,200,{shipments:store.listShipments({status:url.searchParams.get('status')||''})}); }
     if (req.method === 'GET' && path === '/api/admin/shipments.csv') { const u=requireAdmin(req,res,{roles:['owner','operator']}); if(!u)return; const csv=shipmentLabelCsv(store.listShipments({status:url.searchParams.get('status')||''}),store.state); res.writeHead(200,{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="shipment-labels.csv"','cache-control':'no-store','x-content-type-options':'nosniff'}); return res.end(csv); }
     if (req.method === 'PATCH' && path.startsWith('/api/admin/shipments/')) { const u=requireAdmin(req,res,{roles:['owner','operator']}); if(!u)return; const shipmentId=path.split('/').pop(); const b=await body(req); adminBodyError(b,{reasonRequired:true,destructive:['shipped','canceled'].includes(b.status)}); const before=store.state.shipments.find(s=>s.id===shipmentId); if(!before) throw new Error('shipment not found'); const shipment=await store.updateShipment(shipmentId,b); audit(u,req,'shipment.update',`shipment:${shipmentId}`,before,shipment,b.reason); return json(res,200,{shipment}); }
-    if (req.method === 'GET' && path === '/api/admin/payments') { const u=requireAdmin(req,res); if(!u)return; return json(res,200,{payments:store.listPayments(url.searchParams.get('userId')||'')}); }
+    if (req.method === 'GET' && path === '/api/admin/billing') {
+      const u=requireAdmin(req,res); if(!u)return;
+      const options = { role:u.role, from:url.searchParams.get('from')||'', to:url.searchParams.get('to')||'', status:url.searchParams.get('status')||'', method:url.searchParams.get('method')||'', provider:url.searchParams.get('provider')||'', userId:url.searchParams.get('userId')||'', email:url.searchParams.get('email')||'', page:Number(url.searchParams.get('page')||1), pageSize:Number(url.searchParams.get('pageSize')||50) };
+      const result=store.adminBilling(options); audit(u,req,'payment.list','payments:filtered',null,{filters:result.filters,page:result.page,pageSize:result.pageSize,count:result.payments.length});
+      return json(res,200,result);
+    }
+    if (req.method === 'GET' && path === '/api/admin/payments.csv') {
+      const u=requireAdmin(req,res,{roles:['owner']}); if(!u)return;
+      const options = { role:'owner', from:url.searchParams.get('from')||'', to:url.searchParams.get('to')||'', status:url.searchParams.get('status')||'', method:url.searchParams.get('method')||'', provider:url.searchParams.get('provider')||'', userId:url.searchParams.get('userId')||'', email:url.searchParams.get('email')||'', page:1, pageSize:100 };
+      const billing = store.adminBilling(options); const rows = []; for (let page = 1; page <= billing.totalPages; page++) rows.push(...store.adminBilling({...options,pageSize:100,page}).payments);
+      audit(u,req,'payment.export','payments:filtered',null,{count:rows.length,filters:billing.filters});
+      res.writeHead(200, {'content-type':'text/csv; charset=utf-8','content-disposition':`attachment; filename="payments-${new Date().toISOString().slice(0,10)}.csv"`,'cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
+      return res.end(paymentCsv(rows));
+    }
+    if (req.method === 'GET' && path.match(/^\/api\/admin\/payments\/[^/]+$/)) {
+      const u=requireAdmin(req,res,{roles:['owner','operator']}); if(!u)return;
+      const paymentId=path.split('/').pop(); const result=store.adminPaymentDetail(paymentId,{role:u.role}); audit(u,req,'payment.view',`payment:${paymentId}`,null,{paymentId}); return json(res,200,result);
+    }
+    if (req.method === 'GET' && path === '/api/admin/payments') { const u=requireAdmin(req,res); if(!u)return; const userId=url.searchParams.get('userId')||''; const modernKeys=['from','to','status','method','provider','email','page','pageSize']; const legacy=!modernKeys.some(key=>url.searchParams.has(key)); if(legacy&&u.role==='owner'){ const payments=store.listPayments(userId); audit(u,req,'payment.list','payments:legacy',null,{userId,count:payments.length}); return json(res,200,{payments}); } const options={role:u.role,from:url.searchParams.get('from')||'',to:url.searchParams.get('to')||'',status:url.searchParams.get('status')||'',method:url.searchParams.get('method')||'',provider:url.searchParams.get('provider')||'',userId,page:Number(url.searchParams.get('page')||1),pageSize:Number(url.searchParams.get('pageSize')||50),email:url.searchParams.get('email')||''}; const billing=store.adminBilling(options); audit(u,req,'payment.list','payments:legacy',null,{filters:billing.filters,page:billing.page,pageSize:billing.pageSize,count:billing.payments.length}); return json(res,200,{payments:billing.payments,page:billing.page,pageSize:billing.pageSize,total:billing.total,totalPages:billing.totalPages}); }
     if (req.method === 'POST' && path.match(/^\/api\/admin\/payments\/[^/]+\/mark-paid$/)) { const u=requireAdmin(req,res,{roles:['owner']}); if(!u)return; const paymentId=path.split('/')[3]; const b=await body(req); adminBodyError(b,{reasonRequired:true,destructive:false}); return json(res,200,{payment:await store.markPaymentPaid(paymentId,{stripePaymentId:b.stripePaymentId,adminId:u.id,ip:clientIp(req),reason:b.reason})}); }
     if (req.method === 'POST' && path.match(/^\/api\/admin\/payments\/[^/]+\/refund$/)) { const u=requireAdmin(req,res,{roles:['owner']}); if(!u)return; const paymentId=path.split('/')[3]; const b=await body(req); adminBodyError(b,{reasonRequired:true,destructive:true}); return json(res,200,{payment:await store.refundPayment(paymentId,{adminId:u.id,ip:clientIp(req),reason:b.reason})}); }
     if (req.method === 'GET' && path === '/api/admin/bank-transfers') { const u=requireAdmin(req,res); if(!u)return; return json(res,200,{transfers:store.state.bankTransfers.map(x=>({...x}))}); }
