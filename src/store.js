@@ -130,10 +130,31 @@ function maskEmail(email) {
   const local = value.slice(0, at);
   return `${local.length > 1 ? `${local[0]}***` : '***'}${value.slice(at)}`;
 }
+function maskPhone(phone) {
+  const value = String(phone || '');
+  if (!value) return '';
+  const digits = value.replace(/\D/g, '');
+  if (digits.length < 4) return '••••';
+  return `${'•'.repeat(Math.max(0, digits.length - 4))}${digits.slice(-4)}`;
+}
 function maskProviderId(value) {
   const text = String(value || '');
   if (!text) return null;
   return text.length <= 8 ? '••••' : `${text.slice(0, 4)}••••${text.slice(-4)}`;
+}
+// Admin user responses are intentionally built from this allowlist.  Never
+// spread the backing user record: it contains password material, birth date,
+// sessions and other fields that must not cross the admin API boundary.
+function adminUserListDto(user, role = 'viewer') {
+  const owner = role === 'owner';
+  return {
+    id: user.id,
+    email: owner ? user.email : maskEmail(user.email),
+    phone: owner ? (user.phone || '') : maskPhone(user.phone),
+    status: user.status || 'active',
+    createdAt: user.createdAt || null,
+    points: Number(user.points) || 0
+  };
 }
 function birthDateIssue(date, now = Date.now()) {
   const value = String(date ?? '');
@@ -313,13 +334,20 @@ export class Store {
     });
   }
   searchUsers({ q = '', email = '', userId = '', id: idValue = '', phone = '' } = {}) {
-    const terms = [q, email, userId || idValue, phone].map(value => String(value || '').trim().toLowerCase());
-    if (!terms.some(Boolean)) return this.state.users.filter(u => u.role === 'user');
+    const terms = [q, email, userId || idValue, phone].map(value => String(value || '').trim());
+    if (terms.some(value => value.length > 200 || /[\u0000-\u001f\u007f]/.test(value))) throw new Error('invalid user search query');
+    const normalized = terms.map(value => value.toLowerCase());
+    if (!normalized.some(Boolean)) return this.state.users.filter(u => u.role === 'user');
     return this.state.users.filter(u => {
       if (u.role !== 'user') return false;
       const values = [u.email, u.id, u.phone || ''].map(value => String(value).toLowerCase());
-      return terms.every(term => !term || values.some(value => value.includes(term)));
+      return normalized.every(term => !term || values.some(value => value.includes(term)));
     });
+  }
+  adminUserListDto(user, role = 'viewer') {
+    if (!['owner', 'operator', 'viewer'].includes(role)) throw new Error('invalid admin role');
+    if (!user || user.role !== 'user') throw new Error('user not found');
+    return adminUserListDto(user, role);
   }
   userDetails(userId) {
     const user = this.state.users.find(u => u.id === userId && u.role === 'user'); if (!user) throw new Error('user not found');
@@ -327,6 +355,92 @@ export class Store {
     const userCards = this.state.userCards.filter(c => c.userId === userId).map(c => ({ ...c, card: publicCard(this.state.cards.find(card => card.id === c.cardId)) }));
     const shipments = this.listShipments({ userId });
     return { user: { ...publicUser(user), phone: user.phone || '', status: user.status || 'active', createdAt: user.createdAt }, points: user.points, pointTransactions: this.state.pointTransactions.filter(t => t.userId === userId), draws, userCards, shipments };
+  }
+  adminUserDetail(userId, { role = 'viewer', page = 1, pageSize = 50, paymentsPage = page, drawsPage = page, cardsPage = page, pointsPage = page, shipmentsPage = page } = {}) {
+    if (!['owner', 'operator', 'viewer'].includes(role)) throw new Error('invalid admin role');
+    const user = this.state.users.find(item => item.id === userId && item.role === 'user');
+    if (!user) throw new Error('user not found');
+    const paginate = (items, requestedPage = 1, requestedSize = pageSize) => {
+      const safePageSize = Math.min(100, Math.max(1, Number.isInteger(Number(requestedSize)) ? Number(requestedSize) : 50));
+      const requested = Math.max(1, Number.isInteger(Number(requestedPage)) ? Number(requestedPage) : 1);
+      const sorted = items.slice().sort((a, b) => String(b.createdAt || b.obtainedAt || '').localeCompare(String(a.createdAt || a.obtainedAt || '')) || String(b.id || '').localeCompare(String(a.id || '')));
+      const totalPages = Math.max(1, Math.ceil(sorted.length / safePageSize));
+      const safePage = Math.min(requested, totalPages);
+      return { items: sorted.slice((safePage - 1) * safePageSize, safePage * safePageSize), page: safePage, pageSize: safePageSize, total: sorted.length, totalPages };
+    };
+    const billing = this.adminBilling({ role, userId, page: paymentsPage, pageSize });
+    const paymentSummary = billing.summary;
+    const drawTransactions = this.state.pointTransactions.filter(item => item.userId === userId && item.type === 'draw' && item.metadata?.packId);
+    const userDraws = this.state.draws.filter(item => item.userId === userId).slice().sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.id).localeCompare(String(b.id)));
+    const drawsByTransaction = [];
+    const cursors = new Map();
+    for (const transaction of drawTransactions.slice().sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.id).localeCompare(String(b.id)))) {
+      const packId = String(transaction.metadata.packId);
+      const quantity = Math.max(1, Number(transaction.metadata.quantity) || 1);
+      const candidates = userDraws.filter(draw => draw.packId === packId);
+      const cursor = cursors.get(packId) || 0;
+      const selected = candidates.slice(cursor, cursor + quantity);
+      cursors.set(packId, cursor + selected.length);
+      const pack = this.state.packs.find(item => item.id === packId);
+      drawsByTransaction.push({ id: transaction.id, createdAt: transaction.createdAt, packId, packName: pack?.name || '不明なパック', quantity, spentPoints: Math.abs(Number(transaction.amount) || 0), cards: selected.map(draw => ({ id: draw.cardId, name: this.state.cards.find(card => card.id === draw.cardId)?.name || '不明なカード', rarity: draw.rarity, drawId: draw.id })) });
+    }
+    // Include every draw that could not be associated with a modern point
+    // transaction.  A user can have mixed modern/legacy data during a
+    // migration; checking only `!drawTransactions.length` would silently
+    // drop the legacy portion.
+    const assignedDrawIds = new Set(drawsByTransaction.flatMap(row => row.cards.map(card => card.drawId).filter(Boolean)));
+    for (const draw of userDraws) if (!assignedDrawIds.has(draw.id)) {
+      const pack = this.state.packs.find(item => item.id === draw.packId); const card = this.state.cards.find(item => item.id === draw.cardId);
+      drawsByTransaction.push({ id: draw.id, createdAt: draw.createdAt, packId: draw.packId, packName: pack?.name || '不明なパック', quantity: 1, spentPoints: Number(pack?.pricePoints) || 0, cards: [{ id: draw.cardId, name: card?.name || '不明なカード', rarity: draw.rarity, drawId: draw.id }] });
+    }
+    const draws = paginate(drawsByTransaction, drawsPage, pageSize);
+    const userCardRows = this.state.userCards.filter(item => item.userId === userId).map(item => {
+      const draw = this.state.draws.find(record => record.id === item.drawId); const card = this.state.cards.find(record => record.id === item.cardId); const pack = draw && this.state.packs.find(record => record.id === draw.packId);
+      return { id: item.id, cardId: item.cardId, card: publicCard(card), packId: draw?.packId || null, packName: pack?.name || '不明なパック', obtainedAt: item.obtainedAt || draw?.createdAt || null, status: item.status };
+    });
+    const userCards = paginate(userCardRows, cardsPage, pageSize);
+    const pointRows = this.state.pointTransactions.filter(item => item.userId === userId).map(item => {
+      const row = { id: item.id, createdAt: item.createdAt, type: item.type, amount: item.amount, balanceBefore: item.balanceBefore ?? null, balanceAfter: item.balanceAfter ?? null };
+      const metadata = item.metadata || {};
+      const allowed = {};
+      for (const key of ['packId', 'quantity', 'planId', 'paymentId', 'transferId']) if (metadata[key] !== undefined) allowed[key] = metadata[key];
+      if (Object.keys(allowed).length) row.metadata = allowed;
+      if (role === 'viewer') { delete row.id; delete row.metadata; }
+      return row;
+    });
+    const pointTransactions = paginate(pointRows, pointsPage, pageSize);
+    const shipmentRows = this.listShipments({ userId }).map(shipment => ({
+      id: shipment.id, createdAt: shipment.createdAt, status: shipment.status, trackingNumber: shipment.trackingNumber || null,
+      cards: (shipment.cards || []).map(item => ({ userCardId: item.userCardId, card: item.card ? publicCard(item.card) : null }))
+    }));
+    const shipments = paginate(shipmentRows, shipmentsPage, pageSize);
+    const publicUserDetail = {
+      id: user.id,
+      email: role === 'owner' ? user.email : maskEmail(user.email),
+      phone: role === 'owner' ? (user.phone || '') : maskPhone(user.phone),
+      status: user.status || 'active',
+      createdAt: user.createdAt,
+      points: user.points
+    };
+    const mapPayment = payment => {
+      const item = { ...payment };
+      if (role === 'viewer') {
+        for (const key of ['id', 'userId', 'provider', 'providerPaymentId', 'paymentMethod', 'metadata']) delete item[key];
+      } else if (role === 'operator') {
+        item.email = maskEmail(user.email); item.providerPaymentId = maskProviderId(item.providerPaymentId);
+      }
+      return item;
+    };
+    const summary = {
+      gross: paymentSummary.gross, refunds: paymentSummary.refunds, net: paymentSummary.net,
+      paymentCount: paymentSummary.successCount, drawCount: drawsByTransaction.reduce((sum, row) => sum + row.quantity, 0),
+      spentPoints: drawsByTransaction.reduce((sum, row) => sum + row.spentPoints, 0), obtainedCardCount: userCardRows.length
+    };
+    const viewerCard = card => card ? { name: card.name, rarity: card.rarity, imageUrl: card.imageUrl, redeemPoints: card.redeemPoints } : null;
+    const redactDraw = row => role === 'owner' ? row : { createdAt: row.createdAt, packName: row.packName, quantity: row.quantity, spentPoints: row.spentPoints, cards: row.cards.map(card => ({ name: card.name, rarity: card.rarity })) };
+    const redactCard = row => role === 'owner' ? row : { card: viewerCard(row.card), packName: row.packName, obtainedAt: row.obtainedAt, status: row.status };
+    const redactShipment = row => role === 'owner' ? row : { createdAt: row.createdAt, status: row.status, trackingNumber: row.trackingNumber ? maskProviderId(row.trackingNumber) : null, cards: row.cards.map(card => ({ card: viewerCard(card.card) })) };
+    return { user: publicUserDetail, summary, payments: { ...billing, payments: billing.payments.map(mapPayment) }, draws: { ...draws, items: draws.items.map(redactDraw) }, userCards: { ...userCards, items: userCards.items.map(redactCard) }, pointTransactions, shipments: { ...shipments, items: shipments.items.map(redactShipment) } };
   }
   async setUserStatus(userId, status, { adminId, ip = 'unknown', reason } = {}) {
     return this.atomic(state => {
@@ -515,20 +629,28 @@ export class Store {
       const paidAt = effectivePaidAt(payment).value; if (paidAt && (!current.lastPaidAt || Date.parse(paidAt) > Date.parse(current.lastPaidAt))) current.lastPaidAt = paidAt;
       byUser.set(payment.userId, current);
     }
-    const users = [...byUser.values()].sort((a, b) => b.gross - a.gross || b.refunds - a.refunds || a.userId.localeCompare(b.userId)).map(item => ({ ...item, email: role === 'owner' ? item.email : maskEmail(item.email) }));
+    const users = [...byUser.values()].sort((a, b) => b.gross - a.gross || b.refunds - a.refunds || a.userId.localeCompare(b.userId)).map(item => role === 'viewer'
+      ? { email: maskEmail(item.email), gross: item.gross, refunds: item.refunds, net: item.net, paymentCount: item.paymentCount, refundedCount: item.refundedCount, lastPaidAt: item.lastPaidAt }
+      : { ...item, email: role === 'owner' ? item.email : maskEmail(item.email) });
     const sorted = all.slice().sort((a, b) => {
       const aAt = Date.parse(effectivePaidAt(a).value || effectiveRefundedAt(a) || a.createdAt || '') || 0;
       const bAt = Date.parse(effectivePaidAt(b).value || effectiveRefundedAt(b) || b.createdAt || '') || 0;
       return bAt - aAt || String(b.id).localeCompare(String(a.id));
     });
     const safePageSize = Math.min(100, Math.max(1, Number.isInteger(Number(pageSize)) ? Number(pageSize) : 50));
-    const safePage = Math.max(1, Number.isInteger(Number(page)) ? Number(page) : 1);
+    const requestedPage = Math.max(1, Number.isInteger(Number(page)) ? Number(page) : 1);
+    const totalPages = Math.max(1, Math.ceil(sorted.length / safePageSize));
+    const safePage = Math.min(requestedPage, totalPages);
     const payments = sorted.slice((safePage - 1) * safePageSize, safePage * safePageSize).map(payment => {
       const user = userById.get(payment.userId); const paid = effectivePaidAt(payment); const paymentMethod = payment.paymentMethod || payment.metadata?.paymentMethod || null; const paymentProvider = payment.provider || payment.metadata?.provider || (payment.stripePaymentId ? 'stripe' : null);
       const providerPaymentId = payment.stripePaymentId || payment.providerPaymentId || null;
-      return { id: payment.id, userId: payment.userId, email: role === 'owner' ? user.email : maskEmail(user.email), points: payment.points, amount: payment.amount, currency: payment.currency, status: payment.status, paymentMethod, provider: paymentProvider, providerPaymentId: role === 'owner' ? providerPaymentId : maskProviderId(providerPaymentId), createdAt: payment.createdAt, updatedAt: payment.updatedAt, paidAt: paid.value, paidAtEstimated: paid.estimated, refundedAt: payment.refundedAt || null, refundAmount: refundAmount(payment), metadata: payment.metadata?.planId ? { planId: String(payment.metadata.planId) } : {} };
+      const safe = { points: payment.points, amount: payment.amount, currency: payment.currency, status: payment.status, createdAt: payment.createdAt, updatedAt: payment.updatedAt, paidAt: paid.value, paidAtEstimated: paid.estimated, refundedAt: payment.refundedAt || null, refundAmount: refundAmount(payment), email: maskEmail(user.email) };
+      if (role === 'viewer') return safe;
+      return { id: payment.id, userId: payment.userId, email: role === 'owner' ? user.email : maskEmail(user.email), points: safe.points, amount: safe.amount, currency: safe.currency, status: safe.status, paymentMethod, provider: paymentProvider, providerPaymentId: role === 'owner' ? providerPaymentId : maskProviderId(providerPaymentId), createdAt: safe.createdAt, updatedAt: safe.updatedAt, paidAt: safe.paidAt, paidAtEstimated: safe.paidAtEstimated, refundedAt: safe.refundedAt, refundAmount: safe.refundAmount, metadata: payment.metadata?.planId ? { planId: String(payment.metadata.planId) } : {} };
     });
-    return { summary, users, payments, total: sorted.length, page: safePage, pageSize: safePageSize, totalPages: Math.max(1, Math.ceil(sorted.length / safePageSize)), filters: { from: from || '', to: to || '', status: normalizedStatus, method: normalizedMethod, provider: normalizedProvider, userId: userId || '', email: email || '' } };
+    const filters = { from: from || '', to: to || '', status: normalizedStatus, method: normalizedMethod, provider: normalizedProvider };
+    if (role !== 'viewer') { filters.userId = userId || ''; filters.email = role === 'owner' ? email || '' : (normalizedEmail ? maskEmail(email) : ''); }
+    return { summary, users, payments, total: sorted.length, page: safePage, pageSize: safePageSize, totalPages, filters };
   }
   adminPaymentDetail(paymentId, { role = 'viewer' } = {}) {
     if (!['owner', 'operator'].includes(role)) throw new Error('insufficient admin role');

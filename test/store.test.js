@@ -20,7 +20,7 @@ test('admin UI separates feature tabs and gates them by role attributes', () => 
   for (const view of ['overview', 'users', 'cards', 'packs', 'effects', 'shipping']) {
     assert.match(html, new RegExp(`id="admin-${view}-view"`));
   }
-  assert.match(html, /data-view="admin-users-view" data-admin-roles="owner"/);
+  assert.match(html, /data-view="admin-users-view" data-admin-roles="owner operator viewer"/);
   assert.match(html, /data-view="admin-cards-view" data-admin-roles="owner operator"/);
   assert.match(html, /data-view="admin-shipping-view" data-admin-roles="owner operator viewer"/);
   assert.match(html, /function applyAdminRole\(role\)/);
@@ -184,7 +184,7 @@ test('admin billing keeps gross/refund periods independent, masks roles, paginat
   assert.equal(january.summary.gross,1000); assert.equal(january.summary.refunds,1000); assert.equal(january.summary.net,0); assert.equal(january.total,2); assert.equal(january.pageSize,1); assert.equal(january.totalPages,2); assert.equal(january.users[0].email,'u***@example.com'); assert.equal(january.payments[0].paidAtEstimated,false);
   const owner=s.adminBilling({role:'owner',from:'2026-01-01',to:'2026-02-01'}); assert.equal(owner.users[0].email,u.email);
   const detail=s.adminPaymentDetail(payment.id,{role:'operator'}); assert.equal(detail.payment.id,payment.id); assert.match(detail.user.email,/\*\*\*@/); assert.throws(()=>s.adminPaymentDetail(payment.id,{role:'viewer'}),/insufficient/);
-  const legacy={id:'pay_legacy',userId:u.id,points:10,amount:10,currency:'JPY',status:'paid',createdAt:'2026-01-25T00:00:00+09:00',metadata:{}}; s.state.payments.push(legacy); const legacyView=s.adminBilling({role:'viewer',from:'2026-01-01',to:'2026-02-01'}).payments.find(x=>x.id===legacy.id); assert.equal(legacyView.paidAtEstimated,true);
+  const legacy={id:'pay_legacy',userId:u.id,points:10,amount:10,currency:'JPY',status:'paid',createdAt:'2026-01-25T00:00:00+09:00',metadata:{}}; s.state.payments.push(legacy); const legacyView=s.adminBilling({role:'viewer',from:'2026-01-01',to:'2026-02-01'}).payments.find(x=>x.amount===10); assert.equal(legacyView.paidAtEstimated,true); assert.equal('id' in legacyView,false); assert.equal('userId' in legacyView,false);
   const csv=paymentCsv([{id:'\t=FORMULA',userId:'u',email:'x@example.com',status:'paid',amount:1,currency:'JPY',points:1}]); assert.match(csv,/^\ufeffid,userId/); assert.match(csv,/\'\t=FORMULA/); assert.match(csv,/'\t=FORMULA/);
   assert.equal(operator.user.role,'operator');
 });

@@ -56,9 +56,23 @@ const server = http.createServer(async (req, res) => {
       return res.end(csv);
     }
     if (req.method === 'GET' && path === '/api/admin/draws/verify') { if(!requireAdmin(req,res))return; return json(res,200,{valid:store.verifyDrawLog(),count:store.state.draws.length}); }
-    if (req.method === 'GET' && path === '/api/admin/users') { const u=requireAdmin(req,res); if(!u)return; const users=store.searchUsers({q:url.searchParams.get('q')||'',email:url.searchParams.get('email')||'',userId:url.searchParams.get('userId')||'',id:url.searchParams.get('id')||'',phone:url.searchParams.get('phone')||''}); return json(res,200,{users:users.map(x=>({...publicUser(x),phone:x.phone||'',status:x.status||'active',createdAt:x.createdAt}))}); }
-    if (req.method === 'GET' && path.match(/^\/api\/admin\/users\/[^/]+$/)) { const u=requireAdmin(req,res); if(!u)return; const userId=path.split('/').pop(); return json(res,200,{detail:store.userDetails(userId)}); }
-    if (req.method === 'PATCH' && path.match(/^\/api\/admin\/users\/[^/]+$/)) { const u=requireAdmin(req,res,{roles:['owner']}); if(!u)return; const userId=path.split('/').pop(); const b=await body(req); adminBodyError(b,{reasonRequired:true,destructive:b.status==='deleted'}); const status=b.status || (b.frozen === true ? 'frozen' : b.frozen === false ? 'active' : ''); if(!status) throw new Error('status is required'); const detail=await store.setUserStatus(userId,status,{adminId:u.id,ip:clientIp(req),reason:b.reason}); return json(res,200,{detail}); }
+    if (req.method === 'GET' && path === '/api/admin/users') {
+      const u=requireAdmin(req,res); if(!u)return;
+      const email=url.searchParams.get('email')||''; const phone=url.searchParams.get('phone')||'';
+      if (u.role === 'viewer' && (email.trim() || phone.trim())) return json(res,403,{error:'PII search unavailable for viewer'});
+      const users=store.searchUsers({q:url.searchParams.get('q')||'',email,userId:url.searchParams.get('userId')||'',id:url.searchParams.get('id')||'',phone});
+      audit(u,req,'user.list','users:filtered',null,{count:users.length,role:u.role});
+      return json(res,200,{users:users.map(x=>store.adminUserListDto(x,u.role))});
+    }
+    if (req.method === 'GET' && path.match(/^\/api\/admin\/users\/[^/]+$/)) {
+      const u=requireAdmin(req,res); if(!u)return;
+      const userId=decodeURIComponent(path.split('/').pop());
+      if (!store.state.users.some(item=>item.id===userId && item.role==='user')) return json(res,404,{error:'user not found'});
+      const detail=store.adminUserDetail(userId,{role:u.role,page:Number(url.searchParams.get('page')||1),pageSize:Number(url.searchParams.get('pageSize')||50),paymentsPage:Number(url.searchParams.get('paymentsPage')||url.searchParams.get('page')||1),drawsPage:Number(url.searchParams.get('drawsPage')||url.searchParams.get('page')||1),cardsPage:Number(url.searchParams.get('cardsPage')||url.searchParams.get('page')||1),pointsPage:Number(url.searchParams.get('pointsPage')||url.searchParams.get('page')||1),shipmentsPage:Number(url.searchParams.get('shipmentsPage')||url.searchParams.get('page')||1)});
+      audit(u,req,'user.detail.view',`user-detail:${userId}`,null,{sections:['summary','payments','draws','userCards','pointTransactions','shipments'],pages:{payments:detail.payments.page,draws:detail.draws.page,userCards:detail.userCards.page,pointTransactions:detail.pointTransactions.page,shipments:detail.shipments.page}});
+      return json(res,200,{detail});
+    }
+    if (req.method === 'PATCH' && path.match(/^\/api\/admin\/users\/[^/]+$/)) { const u=requireAdmin(req,res,{roles:['owner']}); if(!u)return; const userId=decodeURIComponent(path.split('/').pop()); if(!store.state.users.some(item=>item.id===userId && item.role==='user')) return json(res,404,{error:'user not found'}); const b=await body(req); adminBodyError(b,{reasonRequired:true,destructive:b.status==='deleted'}); const status=b.status || (b.frozen === true ? 'frozen' : b.frozen === false ? 'active' : ''); if(!status) throw new Error('status is required'); const detail=await store.setUserStatus(userId,status,{adminId:u.id,ip:clientIp(req),reason:b.reason}); return json(res,200,{detail}); }
     if (req.method === 'GET' && path === '/api/admin/inventory') { if(!requireAdmin(req,res))return; return json(res,200,{packs:store.adminInventory()}); }
     if (req.method === 'GET' && path === '/api/admin/anomalies') { if(!requireAdmin(req,res))return; const options={}; for(const key of ['windowMs','minHighValue','threshold']) if(url.searchParams.has(key)) options[key]=Number(url.searchParams.get(key)); return json(res,200,{anomalies:store.detectDrawAnomalies(options)}); }
     if (req.method === 'GET' && path === '/api/admin/audit-logs') { const u=requireAdmin(req,res,{roles:['owner','operator','viewer']}); if(!u)return; return json(res,200,{logs:store.state.adminAuditLogs.map(x=>({...x}))}); }
