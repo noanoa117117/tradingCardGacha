@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Store, drawLogCsv, cardCsv, shipmentLabelCsv, generateTotp } from '../src/store.js';
+import { Store, drawLogCsv, cardCsv, shipmentLabelCsv, generateTotp, ageAtLeast18 } from '../src/store.js';
 
 test('guest storefront exposes packs and routes draw attempts to registration', () => {
   const html = fs.readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
@@ -81,6 +81,15 @@ test('registration rejects impossible dates and underage users', () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gacha-')); const s=new Store(path.join(dir,'store.json'));
   assert.throws(()=>s.register({email:'date@example.com',password:'password123',birthDate:'2000-02-30',ageConfirmed:true}),/valid birthDate/);
   assert.throws(()=>s.register({email:'minor@example.com',password:'password123',birthDate:new Date().toISOString().slice(0,10),ageConfirmed:true}),/valid birthDate/);
+});
+test('birthdate age checks use Asia/Tokyo calendar boundaries', () => {
+  // 2026-09-05 00:00 JST is the exact eighteenth birthday boundary.
+  assert.equal(ageAtLeast18('2008-09-05', Date.UTC(2026, 8, 4, 14, 59, 59)), false);
+  assert.equal(ageAtLeast18('2008-09-05', Date.UTC(2026, 8, 4, 15, 0, 0)), true);
+  assert.equal(ageAtLeast18('2008-02-29', Date.UTC(2026, 1, 28, 14, 59, 59)), false);
+  assert.equal(ageAtLeast18('2008-02-29', Date.UTC(2026, 2, 1, 0, 0, 0)), true);
+  assert.equal(ageAtLeast18('2000-02-30', Date.UTC(2026, 8, 5)), false);
+  assert.equal(ageAtLeast18('2027-01-01', Date.UTC(2026, 8, 5)), false);
 });
 test('every seeded pack has displayed slot odds that sum to its total', () => {
   const {s}=setup(); for (const pack of s.state.packs) { const slots=s.state.packSlots.filter(x=>x.packId===pack.id); assert.equal(slots.length,pack.totalSlots); const counts=Object.values(slots.reduce((m,x)=>(m[x.rarity]=(m[x.rarity]||0)+1,m),{})); assert.equal(counts.reduce((a,b)=>a+b,0),pack.totalSlots); }

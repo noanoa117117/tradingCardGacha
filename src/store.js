@@ -90,18 +90,24 @@ function totp(secret, timestamp = Date.now()) {
   const key = base32Decode(secret); if (!key) return null; const counter = Math.floor(timestamp / 30000); const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(counter)); const digest = crypto.createHmac('sha1', key).update(b).digest(); const offset = digest.at(-1) & 15; const code = ((digest.readUInt32BE(offset) & 0x7fffffff) % 1000000).toString().padStart(6, '0'); return code;
 }
 function validTotp(secret, otp) { if (!/^\d{6}$/.test(String(otp))) return false; for (let skew = -1; skew <= 1; skew++) { const code = totp(secret, Date.now() + skew * 30000); if (code && crypto.timingSafeEqual(Buffer.from(code), Buffer.from(String(otp)))) return true; } return false; }
-function ageAtLeast18(date) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) return false;
-  const birth = new Date(`${date}T00:00:00Z`);
-  if (Number.isNaN(birth.getTime())) return false;
-  if (birth.toISOString().slice(0, 10) !== date) return false;
-  const now = new Date();
-  let age = now.getUTCFullYear() - birth.getUTCFullYear();
-  const beforeBirthday = now.getUTCMonth() < birth.getUTCMonth() ||
-    (now.getUTCMonth() === birth.getUTCMonth() && now.getUTCDate() < birth.getUTCDate());
-  if (beforeBirthday) age--;
-  return age >= 18;
+function tokyoDate(value = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value));
+  const fields = Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
 }
+function birthDateIssue(date, now = Date.now()) {
+  const value = String(date ?? '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return 'invalid';
+  const [year, month, day] = value.split('-').map(Number);
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) return 'invalid';
+  const today = tokyoDate(now);
+  if (value > today) return 'future';
+  const [todayYear, todayMonth, todayDay] = today.split('-').map(Number);
+  let age = todayYear - year;
+  if (todayMonth < month || (todayMonth === month && todayDay < day)) age--;
+  return age >= 18 ? null : 'underage';
+}
+export function ageAtLeast18(date, now = Date.now()) { return birthDateIssue(date, now) === null; }
 
 function hashDraw(previousHash, draw) {
   return crypto.createHash('sha256').update(JSON.stringify({ previousHash, ...draw })).digest('hex');
@@ -179,9 +185,13 @@ export class Store {
     return run;
   }
   register({ email, password, birthDate, ageConfirmed, phone = '' }) {
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password || password.length < 8 || !birthDate || !ageConfirmed || !ageAtLeast18(birthDate)) {
-      throw new Error('email, password (8+ chars), valid birthDate and age confirmation are required');
-    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('invalid email');
+    if (!password || password.length < 8) throw new Error('password must be at least 8 characters');
+    const birthIssue = birthDateIssue(birthDate);
+    if (birthIssue === 'invalid') { const error = new Error('valid birthDate'); error.code = 'invalid_birth_date'; error.userMessage = '実在する生年月日を入力してください'; throw error; }
+    if (birthIssue === 'future') { const error = new Error('valid birthDate'); error.code = 'future_birth_date'; error.userMessage = '未来の日付は入力できません'; throw error; }
+    if (birthIssue === 'underage') { const error = new Error('valid birthDate'); error.code = 'underage'; error.userMessage = 'このサービスは18歳未満の方は利用できません'; throw error; }
+    if (!ageConfirmed) { const error = new Error('age confirmation is required'); error.code = 'age_confirmation_required'; error.userMessage = '「私は18歳以上です」にチェックしてください'; throw error; }
     email = email.trim().toLowerCase();
     if (this.state.users.some(u => u.email === email)) throw new Error('email already registered');
     const userId = id('usr'); const p = passwordHash(password);

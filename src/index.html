@@ -45,6 +45,13 @@
     label.wide,.form .wide { grid-column:1/-1; }
     input,select { width:100%; min-height:42px; border:1px solid var(--line); border-radius:6px; background:#0d1117; padding:9px 10px; }
     .check { display:flex; align-items:center; gap:8px; }.check input { width:18px; min-height:18px; }
+    .birth-fieldset { grid-column:1/-1; border:1px solid var(--line); border-radius:6px; padding:12px; margin:0; }
+    .birth-fieldset legend { padding:0 6px; color:var(--text); font-weight:700; }
+    .birth-hint { color:var(--muted); margin:0 0 10px; }
+    .birth-inputs { display:grid; grid-template-columns:1.3fr 1fr 1fr; gap:10px; }
+    .field-error { min-height:1.5em; color:var(--red); font-size:13px; }
+    [aria-invalid="true"] { border-color:var(--red); }
+    .consent-error { margin:-4px 0 0; }
     table { width:100%; border-collapse:collapse; }
     th,td { padding:10px; border-bottom:1px solid var(--line); text-align:left; }
     .table-wrap { overflow:auto; }
@@ -76,11 +83,22 @@
         <label class="wide admin-only">管理者2FAコード（6桁）<input id="login-otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code"></label>
         <button class="btn primary wide" type="submit">ログイン</button>
       </form>
-      <form id="register-form" class="form hidden user-only" style="margin-top:18px">
+      <form id="register-form" class="form hidden user-only" style="margin-top:18px" novalidate>
         <label class="wide">メールアドレス<input id="register-email" type="email" required autocomplete="email"></label>
         <label>パスワード<input id="register-password" type="password" minlength="8" required autocomplete="new-password"></label>
-        <label>生年月日<input id="birth-date" type="date" required></label>
-        <label class="check wide"><input id="age-confirmed" type="checkbox" required>18歳以上であることを確認しました</label>
+        <fieldset class="birth-fieldset" aria-describedby="birth-hint birth-date-error">
+          <legend>生年月日</legend>
+          <p id="birth-hint" class="birth-hint">18歳以上であることを確認するために使用します</p>
+          <div class="birth-inputs">
+            <label>年<input id="birth-year" type="text" inputmode="numeric" autocomplete="bday-year" maxlength="4" placeholder="1990" required aria-describedby="birth-year-error"><span id="birth-year-error" class="field-error" aria-live="polite"></span></label>
+            <label>月<select id="birth-month" autocomplete="bday-month" required aria-describedby="birth-month-error"><option value="">選択</option><option value="1">1月</option><option value="2">2月</option><option value="3">3月</option><option value="4">4月</option><option value="5">5月</option><option value="6">6月</option><option value="7">7月</option><option value="8">8月</option><option value="9">9月</option><option value="10">10月</option><option value="11">11月</option><option value="12">12月</option></select><span id="birth-month-error" class="field-error" aria-live="polite"></span></label>
+            <label>日<input id="birth-day" type="text" inputmode="numeric" autocomplete="bday-day" maxlength="2" placeholder="15" required aria-describedby="birth-day-error"><span id="birth-day-error" class="field-error" aria-live="polite"></span></label>
+          </div>
+          <p class="muted">例：1990年1月15日</p>
+          <p id="birth-date-error" class="field-error" aria-live="polite"></p>
+        </fieldset>
+        <label class="check wide"><input id="age-confirmed" type="checkbox" required aria-describedby="age-confirmed-error">18歳以上であることを確認しました</label>
+        <p id="age-confirmed-error" class="field-error consent-error wide" aria-live="polite"></p>
         <button class="btn primary wide" type="submit">アカウント作成</button>
       </form>
       <button id="browse-packs" class="btn user-only" type="button" style="margin-top:14px">登録せずにガチャを見る</button>
@@ -172,7 +190,29 @@
     async function enterApp() { byId('auth').classList.add('hidden'); byId('app').classList.remove('hidden'); await refreshMe(); setMemberUi(true); if(surface==='admin'){ applyAdminRole(currentUser.role); document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id==='admin-overview-view')); document.querySelectorAll('#nav .tab').forEach(x=>x.classList.toggle('active',x.id==='admin-overview-tab')); const env=await api('/api/admin/environment'); adminEnvironment=env; byId('environment-badge').textContent=`${env.environment.toUpperCase()} · ${currentUser.role}`; byId('environment-badge').style.color=env.production?'var(--red)':'#79d18a'; await loadAdmin(); return; } await Promise.all([loadPacks(),loadCards(),loadShipping(),loadTransactions()]); }
     document.querySelectorAll('[data-auth]').forEach(button=>button.addEventListener('click',()=>{ document.querySelectorAll('[data-auth]').forEach(x=>x.classList.toggle('active',x===button)); byId('login-form').classList.toggle('hidden',button.dataset.auth!=='login'); byId('register-form').classList.toggle('hidden',button.dataset.auth!=='register'); }));
     byId('login-form').addEventListener('submit',async event=>{ event.preventDefault(); try { const credentials={email:byId('login-email').value,password:byId('login-password').value}; const otp=byId('login-otp').value.trim(); const data=await api(surface==='admin'?'/api/admin/auth/login':'/api/auth/login',{method:'POST',body:JSON.stringify(surface==='admin'?{...credentials,otp}:credentials)}); token=data.token; sessionStorage.setItem(tokenKey,token); await enterApp(); } catch(error){toast(error.message,true);} });
-    byId('register-form').addEventListener('submit',async event=>{ event.preventDefault(); try { await api('/api/auth/register',{method:'POST',body:JSON.stringify({email:byId('register-email').value,password:byId('register-password').value,birthDate:byId('birth-date').value,ageConfirmed:byId('age-confirmed').checked})}); toast('登録しました。ログインしてください'); document.querySelector('[data-auth=login]').click(); } catch(error){toast(error.message,true);} });
+    function todayInTokyo(){ const parts=new Intl.DateTimeFormat('en',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()); const value=Object.fromEntries(parts.filter(part=>part.type!=='literal').map(part=>[part.type,part.value])); return `${value.year}-${value.month}-${value.day}`; }
+    function clearBirthErrors(){ for(const id of ['birth-year','birth-month','birth-day','age-confirmed']){ const input=byId(id); input.removeAttribute('aria-invalid'); } for(const id of ['birth-year-error','birth-month-error','birth-day-error','birth-date-error','age-confirmed-error']) byId(id).textContent=''; }
+    function birthError(inputId,errorId,message){ const input=byId(inputId); input.setAttribute('aria-invalid','true'); byId(errorId).textContent=message; }
+    function validateBirthForm(){
+      clearBirthErrors();
+      const year=byId('birth-year').value.trim(), month=byId('birth-month').value, day=byId('birth-day').value.trim();
+      let valid=true;
+      if(!year){ birthError('birth-year','birth-year-error','年を入力してください'); valid=false; }
+      else if(!/^\d{4}$/.test(year)){ birthError('birth-year','birth-year-error','年を4桁の数字で入力してください'); valid=false; }
+      if(!month){ birthError('birth-month','birth-month-error','月を選択してください'); valid=false; }
+      if(!day){ birthError('birth-day','birth-day-error','日を入力してください'); valid=false; }
+      else if(!/^\d{1,2}$/.test(day)){ birthError('birth-day','birth-day-error','日を数字で入力してください'); valid=false; }
+      if(!valid) return null;
+      const normalizedDay=day.padStart(2,'0'), birthDate=`${year}-${String(month).padStart(2,'0')}-${normalizedDay}`;
+      const parsed=new Date(`${birthDate}T00:00:00Z`);
+      if(Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0,10)!==birthDate){ byId('birth-date-error').textContent='実在する生年月日を入力してください'; byId('birth-date-error').setAttribute('role','alert'); byId('birth-day').setAttribute('aria-invalid','true'); return null; }
+      if(birthDate>todayInTokyo()){ byId('birth-date-error').textContent='未来の日付は入力できません'; byId('birth-date-error').setAttribute('role','alert'); byId('birth-year').setAttribute('aria-invalid','true'); return null; }
+      const today=todayInTokyo().split('-').map(Number), birthParts=[Number(year),Number(month),Number(normalizedDay)]; let age=today[0]-birthParts[0]; if(today[1]<birthParts[1] || (today[1]===birthParts[1] && today[2]<birthParts[2])) age--;
+      if(age<18){ byId('birth-date-error').textContent='このサービスは18歳未満の方は利用できません'; byId('birth-date-error').setAttribute('role','alert'); byId('birth-year').setAttribute('aria-invalid','true'); return null; }
+      if(!byId('age-confirmed').checked){ byId('age-confirmed-error').textContent='「私は18歳以上です」にチェックしてください'; byId('age-confirmed-error').setAttribute('role','alert'); byId('age-confirmed').setAttribute('aria-invalid','true'); return null; }
+      return birthDate;
+    }
+    byId('register-form').addEventListener('submit',async event=>{ event.preventDefault(); const birthDate=validateBirthForm(); if(!birthDate) return; try { await api('/api/auth/register',{method:'POST',body:JSON.stringify({email:byId('register-email').value,password:byId('register-password').value,birthDate,ageConfirmed:byId('age-confirmed').checked})}); toast('登録しました。ログインしてください'); document.querySelector('[data-auth=login]').click(); } catch(error){toast(error.message,true);} });
     byId('show-login').addEventListener('click',()=>selectAuth('login'));
     byId('show-register').addEventListener('click',()=>selectAuth('register'));
     byId('browse-packs').addEventListener('click',enterGuest);
