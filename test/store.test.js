@@ -10,7 +10,25 @@ test('guest storefront exposes packs and routes draw attempts to registration', 
   assert.match(html, /else if\(surface==='user'\)enterGuest/);
   assert.match(html, /async function enterGuest\(\).*await loadPacks\(\)/);
   assert.match(html, /if\(!currentUser\)\{ selectAuth\('register'\)/);
-  assert.match(html, /class="tab user-only member-only" data-view="cards-view"/);
+  assert.match(html, /id="mypage-tab" class="tab user-only member-only" data-view="mypage-view"/);
+  assert.match(html, /data-mypage-tab="overview"/);
+  assert.match(html, /data-mypage-tab="cards"/);
+  assert.match(html, /data-mypage-tab="addresses"/);
+  assert.match(html, /const mypageLoaders = \{ overview: loadMypageOverview, cards: loadCards, addresses: loadShipping \}/);
+  assert.match(html, /aria-selected="true"/);
+  assert.match(html, /tabindex="0"/);
+  assert.match(html, /tabindex="-1"/);
+  assert.match(html, /event\.key==='ArrowRight'/);
+  assert.match(html, /event\.key==='ArrowLeft'/);
+  assert.match(html, /event\.key==='Home'/);
+  assert.match(html, /event\.key==='End'/);
+  assert.match(html, /x\.setAttribute\('tabindex',active\?'0':'-1'\)/);
+  assert.match(html, /mypageLoaded\.delete\('overview'\).*loadMypageOverview/);
+  assert.match(html, /async function refreshMypageState\(\)/);
+  assert.match(html, /heldCardStatuses/);
+  assert.match(html, /#mypage-overview\{grid-template-columns:1fr\}/);
+  assert.match(html, /const cardStatusLabel/);
+  assert.match(html, /const shipmentStatusLabel/);
   assert.match(html, /id="show-login"/);
   assert.match(html, /id="show-register"/);
 });
@@ -51,6 +69,13 @@ test('draw is non-replacement and keeps point/card/log consistency', async () =>
 });
 test('draw is atomic on insufficient points', async () => { const {s,u}=setup(); const pack=s.state.packs[0]; s.state.users.find(x=>x.id===u.id).points=0; const snapshot=JSON.stringify(s.state); await assert.rejects(s.draw(u.id,pack.id,1),/insufficient points/); assert.equal(JSON.stringify(s.state),snapshot); });
 test('redemption credits once and rejects repeat', async () => { const {s,u}=setup(); const r=await s.draw(u.id,s.state.packs[0].id,1); const uc=r.results[0].userCard; const points=s.state.users.find(x=>x.id===u.id).points; const out=await s.redeem(u.id,uc.id); assert.equal(out.balance,points+r.results[0].card.redeemPoints); await assert.rejects(s.redeem(u.id,uc.id),/not redeemable/); });
+test('user-facing card collection contains holdings but omits redeemed cards', async () => {
+  const {s,u}=setup(); const result=await s.draw(u.id,s.state.packs[0].id,1); const userCardId=result.results[0].userCard.id;
+  assert.equal(s.publicCards(u.id).length,1);
+  assert.equal(s.publicCards(u.id)[0].status,'unprocessed');
+  await s.redeem(u.id,userCardId);
+  assert.equal(s.publicCards(u.id).length,0);
+});
 test('concurrent draws serialize without double spending slots', async () => {
   const {s,u}=setup(); const pack=s.state.packs[0];
   const results = await Promise.all(Array.from({length: 35}, () => s.draw(u.id, pack.id, 1).catch(error => error.message)));
@@ -173,6 +198,21 @@ test('P3 bank reconciliation, settings, dashboard and shipment label CSV', async
   const settings=await s.updateSiteSettings({announcement:'お知らせ',banner:'top',presets:[{points:100}],bonusRate:10,maintenance:false,termsMarkdown:'# terms',legalMarkdown:'# legal'},{adminId:s.state.adminUsers[0].id,reason:'運用更新'}); assert.equal(settings.banner,'top'); assert.equal(settings.termsMarkdown,'# terms');
   const pending=await s.createPayment({userId:u.id,points:100,amount:100,stripePaymentId:'pi_dash'}); const paid=await s.markPaymentPaid(pending.id,{stripePaymentId:'pi_dash'}); assert.equal(paid.status,'paid'); const dash=s.dashboard(); assert.equal(dash.drawCount,0); assert.equal(dash.sales.total,100);
   const draw=await s.draw(u.id,s.state.packs[0].id,1); const address=await s.addAddress(u.id,{name:'=Name',postalCode:'100-0001',prefecture:'Tokyo',city:'Chiyoda',line1:'1-1'}); const shipment=await s.createShipment(u.id,[draw.results[0].userCard.id],address.id); const csv=shipmentLabelCsv(s.listShipments(),s.state); assert.match(csv,/shipmentId,status/); assert.match(csv,/'=Name/);
+});
+test('dashboard default range includes a payment recorded at the current millisecond', () => {
+  const {s,u}=setup();
+  const realNow=Date.now;
+  const fixedNow=Date.parse('2026-03-01T12:00:00.000Z');
+  Date.now=()=>fixedNow;
+  try {
+    const timestamp=new Date(fixedNow).toISOString();
+    s.state.payments.push({id:'pay_dashboard_boundary',userId:u.id,points:100,amount:100,currency:'JPY',status:'paid',createdAt:timestamp,updatedAt:timestamp,paidAt:timestamp});
+    const dashboard=s.dashboard();
+    assert.equal(dashboard.sales.total,100);
+    assert.equal(dashboard.to,new Date(fixedNow+1).toISOString());
+  } finally {
+    Date.now=realNow;
+  }
 });
 test('admin billing keeps gross/refund periods independent, masks roles, paginates and exports safely', async () => {
   const {s,u}=setup();

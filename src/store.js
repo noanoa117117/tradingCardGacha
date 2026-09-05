@@ -760,7 +760,7 @@ export class Store {
     return this.atomic(state => { const item=input.id&&state.announcements.find(a=>a.id===input.id); const before=item?clone(item):null; const target=item||{id:id('ann'),createdAt:new Date().toISOString()}; target.title=String(input.title||'').trim(); target.body=String(input.body||''); target.banner=String(input.banner||''); target.published=input.published!==false; target.updatedAt=new Date().toISOString(); if(!target.title) throw new Error('announcement title required'); if(!item) state.announcements.push(target); this.appendAudit({actor:adminId,action:item?'announcement.update':'announcement.create',target:`announcement:${target.id}`,before,after:target,ip,reason:reason.trim()},{persist:false}); return clone(target); });
   }
   dashboard({ from, to } = {}) {
-    const now=Date.now(); const fromMs=from ? tokyoDateBoundary(from) : now-30*86400000; const toMs=to ? tokyoDateBoundary(to,true) : now;
+    const now=Date.now(); const fromMs=from ? tokyoDateBoundary(from) : now-30*86400000; const toMs=to ? tokyoDateBoundary(to,true) : now+1;
     if (Number.isNaN(fromMs) || Number.isNaN(toMs) || fromMs >= toMs) throw new Error('invalid dashboard date range');
     const inRange=value=>{const at=Date.parse(value||''); return !Number.isNaN(at)&&at>=fromMs&&at<toMs;};
     const paymentAt=p=>p.paidAt||(['paid','refunded'].includes(p.status)?p.createdAt:null);
@@ -871,7 +871,9 @@ export class Store {
   packOdds(packId) { const slots=this.state.packSlots.filter(s=>s.packId===packId); const counts={}; for(const slot of slots) counts[slot.rarity]=(counts[slot.rarity]||0)+1; const total=slots.length; return Object.fromEntries(Object.entries(counts).map(([rarity,count])=>[rarity,{count,total,probability:total?count/total:0}])); }
   packLineup(packId) { const counts=new Map(); for(const slot of this.state.packSlots.filter(s=>s.packId===packId)){ const key=`${slot.cardId}\u0000${slot.effectRank||''}`; const prior=counts.get(key); if(prior)prior.count++; else counts.set(key,{cardId:slot.cardId,effectRank:slot.effectRank||null,count:1}); } return [...counts.values()].map(item=>({ ...item, card:publicCard(this.state.cards.find(c=>c.id===item.cardId)), probability:item.count/(this.state.packs.find(p=>p.id===packId)?.totalSlots||1) })); }
   publicPacks() { return this.state.packs.slice().sort((a,b)=>(a.displayOrder??0)-(b.displayOrder??0)).map(p => ({ ...p, status:p.status === 'scheduled' && Date.parse(p.startsAt) <= Date.now() ? 'selling' : p.status, slotRows:undefined, remaining: this.state.packSlots.filter(s => s.packId === p.id && !s.drawnAt).length })); }
-  publicCards(userId) { return this.state.userCards.filter(c => c.userId === userId).map(c => ({ ...c, card: publicCard(this.state.cards.find(x => x.id === c.cardId)) })); }
+  // A redeemed card is no longer part of the user's holdings. Keep it in
+  // admin/audit history, but omit it from the user-facing collection.
+  publicCards(userId) { return this.state.userCards.filter(c => c.userId === userId && c.status !== 'redeemed').map(c => ({ ...c, card: publicCard(this.state.cards.find(x => x.id === c.cardId)) })); }
 }
 
 export const publicUser = u => ({ id: u.id, email: u.email, points: u.points, role: u.role, birthDate: u.birthDate });
