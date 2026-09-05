@@ -6,6 +6,15 @@ const DATA_FILE = process.env.GACHA_DATA_FILE || path.join(process.cwd(), 'data'
 const clone = value => JSON.parse(JSON.stringify(value));
 const id = prefix => `${prefix}_${crypto.randomBytes(10).toString('hex')}`;
 const DEFAULT_DEV_TOTP_SECRET = 'JBSWY3DPEHPK3PXP';
+// Fixed, server-owned point plans.  The client may select a plan ID but never
+// controls the points, amount, or currency attached to it.
+export const POINT_PLANS = Object.freeze([
+  Object.freeze({ id: 'points_1000', points: 1000, amount: 1000, currency: 'JPY', label: '1,000ポイント' }),
+  Object.freeze({ id: 'points_3000', points: 3000, amount: 3000, currency: 'JPY', label: '3,000ポイント' }),
+  Object.freeze({ id: 'points_5000', points: 5000, amount: 5000, currency: 'JPY', label: '5,000ポイント' }),
+  Object.freeze({ id: 'points_10000', points: 10000, amount: 10000, currency: 'JPY', label: '10,000ポイント' })
+]);
+export function pointPlanById(planId) { return POINT_PLANS.find(plan => plan.id === String(planId || '')) || null; }
 export function drawLogCsv(draws) {
   const headers = ['id','userId','packId','slotId','cardId','rarity','remainingBefore','remainingAfter','createdAt','previousHash','hash'];
   const csvValue = value => { const text = String(value ?? ''); const safe = /^[=+\-@]/.test(text) ? `'${text}` : text; return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"','""')}"` : safe; };
@@ -420,6 +429,10 @@ export class Store {
   async createPayment({ userId, points, amount = 0, currency = 'JPY', stripePaymentId = null, metadata = {} } = {}) {
     points = Number(points); amount = Number(amount);
     if (!userId || !Number.isInteger(points) || points < 1 || !Number.isInteger(amount) || amount < 0) throw new Error('invalid payment');
+    const user = this.state.users.find(item => item.id === userId && item.role === 'user');
+    if (!user) throw new Error('user not found');
+    if (user.status === 'frozen' || user.status === 'deleted') throw new Error('user is frozen or deleted');
+    if (!ageAtLeast18(user.birthDate)) throw new Error('user must be at least 18');
     let providerResult = null;
     if (this.paymentProvider?.createPayment) providerResult = await this.paymentProvider.createPayment({ userId, points, amount, currency, metadata });
     // A client-supplied Stripe ID is only a reference; credit points after an

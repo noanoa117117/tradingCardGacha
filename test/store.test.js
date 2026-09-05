@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Store, drawLogCsv, cardCsv, shipmentLabelCsv, generateTotp, ageAtLeast18 } from '../src/store.js';
+import { Store, POINT_PLANS, drawLogCsv, cardCsv, shipmentLabelCsv, generateTotp, ageAtLeast18 } from '../src/store.js';
 
 test('guest storefront exposes packs and routes draw attempts to registration', () => {
   const html = fs.readFileSync(new URL('../src/index.html', import.meta.url), 'utf8');
@@ -151,6 +151,15 @@ test('P3 payments keep provider pending boundary and refund is retryable/idempot
   const payment=await s.createPayment({userId:u.id,points:500,amount:500}); assert.equal(payment.status,'paid'); assert.equal(payment.stripePaymentId,'pi_test'); const balance=s.state.users.find(x=>x.id===u.id).points;
   await assert.rejects(s.refundPayment(payment.id,{adminId:s.state.adminUsers[0].id,reason:'customer request'}),/temporary/); assert.equal(s.state.payments.find(x=>x.id===payment.id).status,'refund_failed'); assert.equal(s.state.users.find(x=>x.id===u.id).points,balance);
   const refunded=await s.refundPayment(payment.id,{adminId:s.state.adminUsers[0].id,reason:'retry'}); assert.equal(refunded.status,'refunded'); assert.equal(s.state.users.find(x=>x.id===u.id).points,balance-500); await assert.rejects(s.refundPayment(payment.id,{adminId:s.state.adminUsers[0].id,reason:'duplicate'}),/already refunded/);
+});
+test('point purchase boundary rejects frozen or underage users before any provider call', async () => {
+  const {s,u}=setup();
+  assert.equal(POINT_PLANS.find(plan=>plan.id==='points_1000').currency,'JPY');
+  s.state.users.find(user=>user.id===u.id).status='frozen';
+  await assert.rejects(s.createPayment({userId:u.id,points:1000,amount:1000}),/frozen/);
+  s.state.users.find(user=>user.id===u.id).status='active';
+  s.state.users.find(user=>user.id===u.id).birthDate='2015-01-01';
+  await assert.rejects(s.createPayment({userId:u.id,points:1000,amount:1000}),/at least 18/);
 });
 test('P3 bank reconciliation, settings, dashboard and shipment label CSV', async () => {
   const {s,u}=setup(); const transfer=await s.createBankTransfer({userId:null,points:200,amount:200,reference:'BANK-1'}); const reconciled=await s.reconcileBankTransfer(transfer.id,{userId:u.id,adminId:s.state.adminUsers[0].id,reason:'入金確認'}); assert.equal(reconciled.status,'reconciled'); assert.equal(s.state.users.find(x=>x.id===u.id).points,100200); await assert.rejects(s.reconcileBankTransfer(transfer.id,{userId:u.id,adminId:s.state.adminUsers[0].id,reason:'二重'}),/already reconciled/);

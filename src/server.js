@@ -1,6 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
-import { Store, drawLogCsv, cardCsv, shipmentLabelCsv, publicCard, publicUser } from './store.js';
+import { Store, POINT_PLANS, pointPlanById, drawLogCsv, cardCsv, shipmentLabelCsv, publicCard, publicUser } from './store.js';
 
 const store = new Store();
 const port = Number(process.env.PORT || 3000);
@@ -42,6 +42,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path === '/api/cards/redeem') { const u=requireUser(req,res); if(!u)return; const b=await body(req); return json(res,200,await store.redeemMany(u.id,b.userCardIds)); }
     if (req.method === 'POST' && path.startsWith('/api/cards/') && path.endsWith('/redeem')) { const u=requireUser(req,res); if(!u)return; const id=path.split('/')[3]; return json(res,200,await store.redeem(u.id,id)); }
     if (req.method === 'GET' && path === '/api/transactions') { const u=requireUser(req,res); return u && json(res,200,{transactions:store.state.pointTransactions.filter(x=>x.userId===u.id)}); }
+    if (req.method === 'GET' && path === '/api/point-plans') return json(res,200,{plans:POINT_PLANS.map(plan=>({...plan}))});
     if (req.method === 'GET' && path === '/api/effects') return json(res,200,{effects:store.state.effectVideos});
     if (req.method === 'POST' && path === '/api/addresses') { const u=requireUser(req,res); if(!u)return; return json(res,201,{address:await store.addAddress(u.id,await body(req))}); }
     if (req.method === 'GET' && path === '/api/addresses') { const u=requireUser(req,res); return u && json(res,200,{addresses:store.state.addresses.filter(a=>a.userId===u.id)}); }
@@ -79,7 +80,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path === '/api/admin/effect-ranks') { const u=requireAdmin(req,res,{roles:['owner','operator']}); if(!u)return; const b=await body(req); adminBodyError(b,{reasonRequired:true}); const rank=await store.setEffectRank(b); audit(u,req,'effect_rank.update',`rank:${rank.name}`,null,rank,b.reason); return json(res,200,{rank}); }
     if (req.method === 'POST' && path === '/api/admin/effects') { const u=requireAdmin(req,res,{roles:['owner','operator']}); if(!u)return; const b=await body(req); adminBodyError(b,{reasonRequired:true}); const effect=await store.setEffect(b); audit(u,req,'effect.update',`rarity:${effect.rarity}`,null,effect,b.reason); return json(res,200,{effect}); }
     if (req.method === 'GET' && path === '/api/payments') { const u=requireUser(req,res); return u && json(res,200,{payments:store.listPayments(u.id)}); }
-    if (req.method === 'POST' && path === '/api/payments') { const u=requireUser(req,res); if(!u)return; const b=await body(req); return json(res,201,{payment:await store.createPayment({...b,userId:u.id})}); }
+    if (req.method === 'POST' && path === '/api/payments') {
+      const u=requireUser(req,res); if(!u)return;
+      const b=await body(req); const plan=pointPlanById(b.planId);
+      if (!plan) throw new Error('invalid point plan');
+      // Reject client attempts to override server-owned pricing fields.
+      for (const key of ['points','amount','currency']) if (b[key] !== undefined && String(b[key]) !== String(plan[key])) throw new Error('point plan values cannot be changed');
+      if (b.stripePaymentId !== undefined && b.stripePaymentId !== null && String(b.stripePaymentId).trim()) throw new Error('provider payment ID cannot be supplied by the client');
+      return json(res,201,{payment:await store.createPayment({userId:u.id,points:plan.points,amount:plan.amount,currency:plan.currency,metadata:{planId:plan.id}})});
+    }
     if (req.method === 'GET' && path === '/api/site-settings') { return json(res,200,{settings:{...store.state.siteSettings},announcements:store.state.announcements.filter(a=>a.published).map(a=>({...a}))}); }
     if (req.method === 'GET' && path === '/api/admin/shipments') { const u=requireAdmin(req,res,{roles:['owner','operator','viewer']}); if(!u)return; return json(res,200,{shipments:store.listShipments({status:url.searchParams.get('status')||''})}); }
     if (req.method === 'GET' && path === '/api/admin/shipments.csv') { const u=requireAdmin(req,res,{roles:['owner','operator']}); if(!u)return; const csv=shipmentLabelCsv(store.listShipments({status:url.searchParams.get('status')||''}),store.state); res.writeHead(200,{'content-type':'text/csv; charset=utf-8','content-disposition':'attachment; filename="shipment-labels.csv"','cache-control':'no-store','x-content-type-options':'nosniff'}); return res.end(csv); }
